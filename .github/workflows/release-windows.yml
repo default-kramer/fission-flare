@@ -1,0 +1,27 @@
+name: release-windows
+on:
+  workflow_dispatch:
+  release:
+    types:
+      - created
+jobs:
+  release-windows:
+    runs-on: windows-2019
+    steps:
+      - name: Install Racket
+        uses: Bogdanp/setup-racket@v1.6
+        with:
+          architecture: 'x64'
+          distribution: 'full'
+          variant: 'CS'
+          version: '8.2'
+      - run: racket -v
+      - name: Checkout
+        uses: actions/checkout@v2
+      - run: dir
+      - run: powershell -ExecutionPolicy Unrestricted .\dist\distribute-windows.ps1
+      - run: Get-FileHash dist\fission-flare-windows.zip | Format-List
+      - name: Release Artifacts
+        uses: softprops/action-gh-release@v1
+        with:
+          files: dist\fission-flare-windows.zip

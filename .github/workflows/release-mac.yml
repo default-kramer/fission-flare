@@ -1,0 +1,29 @@
+name: release-mac
+on:
+  workflow_dispatch:
+  release:
+    types:
+      - created
+jobs:
+  release-mac:
+    runs-on: macos-11
+    steps:
+      - name: Install Racket
+        uses: Bogdanp/setup-racket@v1.6
+        with:
+          architecture: 'x64'
+          distribution: 'full'
+          variant: 'CS'
+          version: '8.2'
+      - run: racket -v
+      - name: Checkout
+        uses: actions/checkout@v2
+      - run: ls
+      - run: raco exe -o fission-flare.app src/ui/main-frame.rkt
+      - run: raco distribute dist/mac fission-flare.app
+      - run: tar -czf dist/fission-flare-mac.tgz dist/mac
+      - run: openssl dgst -sha256 dist/fission-flare-mac.tgz
+      - name: Release Artifacts
+        uses: softprops/action-gh-release@v1
+        with:
+          files: dist/fission-flare-mac.tgz
