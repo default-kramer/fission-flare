@@ -20,4 +20,4 @@ git clone https://github.com/default-kramer/fission-flare.git
 cd ./fission-flare/src/ui
 racket main-frame.rkt
 ```
-You can also do `raco exe main-frame.rkt`; see [the docs for raco exe](https://docs.racket-lang.org/raco/exe.html)
+You can also try `raco exe --gui main-frame.rkt`; see [the docs for raco exe](https://docs.racket-lang.org/raco/exe.html)
