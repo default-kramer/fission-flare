@@ -6,7 +6,7 @@ Run fission-flare.exe
 # Mac
 Download fission-flare-mac.tgz from [the Releases page](https://github.com/default-kramer/fission-flare/releases).
 Extract it.
-Run fission-flare-mac.app (in the `bin` directory).
+Run fission-flare-mac.app (currently in the `dist/mac/` subdirectory)
 
 # Linux
 You'll have to build from source for now.
