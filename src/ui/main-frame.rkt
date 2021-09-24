@@ -2,10 +2,6 @@
 
 ; Future Work:
 ; * improve anchoring/catchup/replay-lag
-; * create docs
-;   - how to install/run (virus warning)
-;   - how to play
-;   - mention multiplayer > 2
 ; * make sure controller feels OK
 ; * wave completion should be more obvious (the last wave can be hard to be sure)
 ;   - probably should clear the half-grid even when there is no incoming wave
@@ -23,6 +19,10 @@
          "setup-panel.rkt"
          "occupant-picts.rkt"
          )
+
+; Write to console immediately, otherwise the console window might pop up
+; in front of the frame in the middle of a game.
+(println "Established console output")
 
 (define host-frame #f)
 

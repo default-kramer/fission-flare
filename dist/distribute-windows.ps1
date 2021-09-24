@@ -12,7 +12,7 @@ function run () {
 
 echo "entered distribute-windows.ps1"
 echo "running raco exe"
-run raco exe -o fission-flare.exe src\ui\main-frame.rkt
+run raco exe --gui -o fission-flare.exe src\ui\main-frame.rkt
 echo "running raco distribute"
 run raco distribute dist\windows fission-flare.exe
 echo "creating zip"
