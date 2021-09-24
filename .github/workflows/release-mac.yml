@@ -19,7 +19,8 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v2
       - run: ls
-      - run: raco exe -o fission-flare.app src/ui/main-frame.rkt
+      # Added `--gui` to hopefully fix https://github.com/default-kramer/fission-flare/issues/2
+      - run: raco exe --gui -o fission-flare.app src/ui/main-frame.rkt
       - run: raco distribute dist/mac fission-flare.app
       - run: tar -czf dist/fission-flare-mac.tgz dist/mac
       - run: openssl dgst -sha256 dist/fission-flare-mac.tgz
