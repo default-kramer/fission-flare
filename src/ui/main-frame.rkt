@@ -172,10 +172,6 @@
        (if shift?
            (action:jump 'r)
            (action:move 'r))]
-      [(down)
-       (action:move 'd)]
-      [(up)
-       (action:move 'u)]
       [(#\d #\D)
        (action:rotate #f)]
       [(#\f #\F)

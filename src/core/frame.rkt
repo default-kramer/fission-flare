@@ -94,15 +94,18 @@
 (define (bursting->bursted [frame : Frame])
   (let* ([state (frame-state frame)]
          [counter (frame-counter frame)]
+         [new-info (add-counter counter '(falling))]
          [result (state-apply state (list (burst)))]
          #:break (when (not (car result))
-                   (fail "frame burst failed"))
+                   ; Nothing bursted (no blanks on screen)
+                   (list (struct-copy Frame frame
+                                      [info new-info])))
          [state (car result)]
          [events (cdr result)])
     (cons
      (struct-copy Frame frame
                   [state state]
-                  [info (add-counter counter '(falling))])
+                  [info new-info])
      events)))
 
 (: frame-time-remaining (-> Frame (U #f Real)))
