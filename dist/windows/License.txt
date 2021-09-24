@@ -1,0 +1,7 @@
+The source code of this game is licensed under the GNU GPL v3 which is included as "GPLv3.txt" in this directory.
+Source code is available at https://github.com/default-kramer/fission-flare
+
+This distribution also includes the Racket runtime system as dynamicaly linked library.
+Racket license info: https://docs.racket-lang.org/license/index.html
+Racket source code: https://github.com/racket/racket
+Racket project page: https://racket-lang.org/
