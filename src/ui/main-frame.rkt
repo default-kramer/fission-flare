@@ -185,7 +185,8 @@
        ; The key release code (shift) does not match the key down code (rshift)
        ; I think this is a Racket bug https://github.com/racket/gui/issues/236
        ; This might cause a problem, but so far I haven't noticed it.
-       (if (equal? 'shift (send key-event get-key-release-code))
+       ; (But check for rshift anyway because the bug might not be present.)
+       (if (memq (send key-event get-key-release-code) '(shift rshift))
            (begin (set! holding-drop-button? #f)
                   (action:drop-keyup))
            #f)]
