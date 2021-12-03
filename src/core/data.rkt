@@ -212,7 +212,7 @@
   #;([id : Type default-value] ...)
   (define gs#
     #'(; === Layout Settings ===
-       [layout:mode : (U 'standard 'wave) 'standard]
+       [layout:mode : (U 'standard 'wave 'mini) 'standard]
        ; standard layout only: How high should fuel be generated?
        [layout:fuel-height : Integer 10]
        ; standard layout only: How many fuels should be generated?

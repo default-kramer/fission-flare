@@ -466,7 +466,7 @@
   (let* ([settings (state-settings state)]
          [layout-mode (game-settings-layout:mode settings)])
     (case layout-mode
-      [(standard)
+      [(standard mini)
        (add-fuel/standard-layout state)]
       [(wave)
        (add-fuel/wave-layout state)])))
@@ -963,9 +963,12 @@
 
 (: make-initial-state (-> GameSettings State))
 (define (make-initial-state settings)
-  (let* ([wave-mode? (equal? 'wave (game-settings-layout:mode settings))]
-         [width (if wave-mode? 16 8)]
-         [height (if wave-mode? 16 22)]
+  (let* ([mode (game-settings-layout:mode settings)]
+         [(width height wave-mode?)
+          (case mode
+            [(wave) (values 16 16 #t)]
+            [(standard) (values 8 22 #f)]
+            [(mini) (values 8 15 #f)])]
          [state (make-empty-state width height settings)]
          [state (add-ground state)]
          [state (if wave-mode?

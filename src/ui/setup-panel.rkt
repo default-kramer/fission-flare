@@ -83,6 +83,13 @@
                     [layout:num-waves 5]
                     [energy:fuel-value 50]
                     [energy:wave-completion-bonus 3000])]
+      [(2 mini)
+       (struct-copy GameSettings default-game-settings
+                    [layout:mode 'mini]
+                    [layout:num-waves 1]
+                    [layout:fuel-count 12]
+                    [layout:fuel-height 5]
+                    [energy:drain-rate 0])]
       [else
        (fail "unexpected mode:" mode)])))
 
@@ -253,7 +260,7 @@
                   [callback respec])))
       (def @mode choice%
         [label "Layout  "]
-        [choices '("Standard" "Wave")]
+        [choices '("Standard" "Wave" "Mini")]
         [callback respec])
       (def @level slider%
         [label "Level"]
