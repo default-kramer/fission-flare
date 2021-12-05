@@ -399,6 +399,8 @@
   (DropKeydown drop-keydown ())
   (DropKeyup drop-keyup ()))
 
+(define action? (make-predicate Action))
+
 ; Events
 ; We do not transmit Events across the network. We will get the same
 ; sequence of Events as long as we replay the Stamped Actions correctly.
@@ -551,6 +553,39 @@
     (rs:sync 1 (list (the rotate) (the move))
              (list (cons (the stamp) (the rotate))
                    (cons (the stamp) (the plummet))))
+
+    ; ===============
+    ; For Local Storage Only!!!
+    ; The following structs are not transmitted over the network during
+    ; a live game. Be careful not to change that fact by accident.
+    ; (Maybe I should have separate `datum->dto` and `datum->dto/extended` procs?
+    ;  Nah, that's premature paranoia.)
+    ; ===============
+    (catalyst 'y #f)
+    (combo (list (the destruction-group)) 2 (list))
+    (destruction '(2 . 2) (the fuel) 2)
+    (destruction-group 'r (list (the destruction)))
+    (frame (the state) 0 (list 0 'waiting) (the timing))
+    (fuel 'y #f)
+    (grid (hash) 1 2)
+    (ground)
+    (layout-state #f '#(1 2 3 4 5 6))
+    (penalty-state 0)
+    (spawn-state (list) '#(1 2 3 4 5 6))
+    (state (the grid)
+           #f
+           (the spawn-state)
+           (the penalty-state)
+           0 ; energy
+           (the layout-state)
+           #f ; current-combo
+           #f ; previous-combo
+           (the game-settings)
+           (the stats)
+           #f ; game-over?
+           )
+    (stats 1 2 3 4 5)
+    (timing 30 1 2 3 4)
     ))
 
 (: read-dto (->* () (Input-Port) Any))

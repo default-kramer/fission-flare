@@ -31,6 +31,8 @@
          ; Stats
          Stats stats?
          stats-spawn-count stats-spawn-energy stats-waiting-frames stats-waiting-energy
+         ; GameLog
+         GameLog gamelog? read-gamelog gamelog->replay
 
          ; === below this line is only used in multiplayer ===
          write-dto read-dto
@@ -65,6 +67,7 @@
 (require racket/provide
          "core/data.rkt"
          "core/frame.rkt"
+         "core/gamelog.rkt"
          "core/replay.rkt"
          "core/state.rkt"
          "core/server.rkt"

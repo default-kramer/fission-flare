@@ -1,7 +1,7 @@
 #lang typed/racket
 
 (provide Replay replay? make-replay replay-frame
-         replay-enqueue! replay-advance!)
+         replay-enqueue! replay-advance! replay-fast-forward!)
 
 (require "bus.rkt"
          "../typed-utils.rkt"
@@ -75,6 +75,7 @@
 
 (: replay-advance! (-> Replay FrameCount Void))
 ; Advance the replay to the target frame count (if possible).
+; Will not skip frames that are important for animation.
 (define (replay-advance! replay target)
   (define-syntax-rule (too-old? x)
     (equal? 'action-too-old (cadr x)))
@@ -107,3 +108,13 @@
     (when action-performed?
       (set-replay-old-frame! replay frame)
       (set-replay-action-queue! replay new-q))))
+
+(: replay-fast-forward! (-> Replay FrameCount Void))
+; Advance the replay to the target frame count.
+; Skip past all frames, even those important for animation.
+(define (replay-fast-forward! replay target)
+  (let* ([frame (replay-frame replay)]
+         [start (frame-counter frame)])
+    (for ([i (in-range start (add1 target))])
+      (replay-advance! replay i))
+    (void)))

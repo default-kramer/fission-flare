@@ -63,6 +63,7 @@
            (go (vector-ref vec i)))
          (put ")"))]
       [(or (symbol? dto)
+           (keyword? dto)
            (string? dto)
            (number? dto)
            (boolean? dto)

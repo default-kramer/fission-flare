@@ -1,6 +1,7 @@
 #lang typed/racket
 
 (provide single-player-game multi-player-game
+         relaxed-replay-viewer
          relaxed-single-player-game relaxed-multi-player-game)
 
 (require typed/pict
@@ -45,34 +46,83 @@
                                   [get-pict (-> Integer Integer Pict)]
                                   [next-frame! (-> Void)])
 
-  (define (relaxed-single-player-game [x : (U State Frame)])
-    (relax (single-player-game x)))
+  (define (relaxed-replay-viewer [log : GameLog])
+    (relax (replay-viewer log)))
+
+  (define (relaxed-single-player-game [x : (U State Frame)] [port : (U #f Output-Port)])
+    (relax (single-player-game x port)))
 
   (define (relaxed-multi-player-game [all-players : (Listof PlayerInfo)]
                                      [pid : Pid]
                                      [sync-func : (-> rq:Sync (Evtof rs:Sync))])
     (relax (multi-player-game all-players pid sync-func))))
 
-(: single-player-game (-> (U State Frame) Controller))
-(define (single-player-game x)
+(: replay-viewer (-> GameLog Controller))
+(define (replay-viewer gamelog)
+  (define frame-num : Integer 0)
+  (define replay : Replay (gamelog->replay gamelog))
+  (lambda (sym)
+    (case sym
+      [(do-action!)
+       (lambda (action)
+         (void))]
+      [(next-frame!)
+       (lambda ()
+         (set! frame-num (add1 frame-num))
+         (replay-advance! replay frame-num)
+         (void))]
+      [(get-pict)
+       (lambda (canvas-w canvas-h)
+         (single-player-pict (replay-frame replay) canvas-w canvas-h))]
+      [(game-over?)
+       (lambda ()
+         (state-game-over? (frame-state (replay-frame replay))))])))
+
+(: single-player-game (-> (U State Frame) (U #f Output-Port) Controller))
+(define (single-player-game x record-port)
+  (define game-log
+    (if record-port
+        (lambda (x)
+          (write-dto x record-port)
+          (displayln "" record-port))
+        (lambda (x) (void))))
   (let ([frame (if (frame? x)
                    x
-                   (make-first-frame x))])
+                   (make-first-frame x))]
+        [wrote-last-frame? : Boolean #f])
+
+    ; Also writes the last frame to the game log if we need to do so.
+    (define (check-game-over)
+      (let ([game-over? (state-game-over? (frame-state frame))])
+        (when (and game-over? (not wrote-last-frame?))
+          (set! wrote-last-frame? #t)
+          (game-log `(#:last-frame ,frame)))
+        game-over?))
+
+    (game-log `(#:version 1))
+    (game-log `(#:first-frame ,frame))
+
     (lambda (sym)
       (case sym
         [(do-action!)
          (lambda (action)
-           (set! frame (or (frame-do-action frame action)
-                           frame)))]
+           (let ([new-frame (frame-do-action frame action)])
+             (when new-frame
+               (set! frame new-frame)
+               (game-log (cons (frame-counter new-frame) action))
+               (cons (make-stamp #f #f (frame-counter new-frame))
+                     action))
+             (void)))]
         [(next-frame!)
          (lambda ()
-           (set! frame (car (next-frame frame))))]
+           (set! frame (car (next-frame frame)))
+           (check-game-over)
+           (void))]
         [(get-pict)
          (lambda (canvas-w canvas-h)
            (single-player-pict frame canvas-w canvas-h))]
         [(game-over?)
-         (lambda ()
-           (state-game-over? (frame-state frame)))]))))
+         check-game-over]))))
 
 (: do-action (-> State Action (U #f State)))
 (define (do-action state action)
