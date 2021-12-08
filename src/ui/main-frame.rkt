@@ -317,6 +317,12 @@
                     [controller (relaxed-replay-viewer gamelog)])
                (start-game controller)))))])
 
+  (vn button%
+      [parent main-panel]
+      [label "Watch AI"]
+      [callback (lambda args
+                  (set-child ai-stepper-setup-panel))])
+
   (let ([wrapper (new vertical-panel%
                       [parent main-panel]
                       [alignment '(left bottom)])]
@@ -333,25 +339,30 @@
     (msg (format "please let me know at ~a.~a@gmail.com" e1 e2))
     (msg "so that I don't duplicate your work."))
 
-  {begin ; single-player
-    (define single-player-setup-panel
-      (let ()
-        (define (start-the-game . args)
-          (let* ([settings (send sp make-game-settings)]
-                 [state (make-initial-state settings)])
-            (set! game-log-port #f)
-            (when game-log-dir
-              (let* ([record-file (format "~a\\~a.ffreplay"
-                                          game-log-dir
-                                          (current-inexact-milliseconds))]
-                     [port (open-output-file record-file)])
-                (set! game-log-port port)))
-            (start-game (relaxed-single-player-game state game-log-port))))
-        (define sp (new setup-panel%
-                        [parent main-container]
-                        [start-game-callback start-the-game]))
-        sp))
-    }
+  (define (make-setup-panel gamelog-subdir game-maker)
+    (define (start-the-game . args)
+      (let* ([settings (send sp make-game-settings)]
+             [state (make-initial-state settings)])
+        (set! game-log-port #f)
+        (when (and game-log-dir gamelog-subdir)
+          (let* ([record-file (format "~a\\~a\\~a.ffreplay"
+                                      game-log-dir
+                                      gamelog-subdir
+                                      (current-inexact-milliseconds))]
+                 [port (open-output-file record-file)])
+            (set! game-log-port port)))
+        (start-game (game-maker state game-log-port))))
+    (define sp (new setup-panel%
+                    [parent main-container]
+                    [start-game-callback start-the-game]))
+    sp)
+
+  (define single-player-setup-panel
+    (make-setup-panel
+     "human" (lambda (state port) (relaxed-single-player-game state port))))
+  (define ai-stepper-setup-panel
+    (make-setup-panel
+     "ai" (lambda (state port) (relaxed-ai-stepper (make-first-frame state) port))))
 
   (define (get-username)
     (define result

@@ -1,7 +1,7 @@
 #lang typed/racket
 
 (provide make-initial-state make-empty-state state-get state-width state-height
-         state-apply state-next-spawns state-waiting-frame)
+         state-apply state-next-spawns state-waiting-frame parse-state)
 
 (require "data.rkt"
          "grid.rkt"
@@ -1121,3 +1121,22 @@
 (: state-height (-> State Dimension))
 (define (state-height state)
   (grid-height (state-grid state)))
+
+; Parse a state from a textual representation of a grid and the catalyst queue
+(: parse-state (-> (Listof (Listof Symbol)) (Listof Symbol) State))
+(define (parse-state grid-pattern queue-pattern)
+  (define (convert-queue-item [item : (Pairof Catalyst Catalyst)])
+    ; parse-queue returns catatlyst pairs but we only need the colors:
+    (cons (catalyst-color (car item))
+          (catalyst-color (cdr item))))
+  (let* ([grid (parse-grid grid-pattern)]
+         [queue (parse-queue queue-pattern)]
+         [queue (map convert-queue-item queue)]
+         [state (make-empty-state (grid-width grid) (grid-height grid))]
+         [spawn-state (state-spawn-state state)]
+         [spawn-state (struct-copy SpawnState spawn-state
+                                   [card-stack queue])]
+         [state (struct-copy State state
+                             [grid grid]
+                             [spawn-state spawn-state])])
+    state))

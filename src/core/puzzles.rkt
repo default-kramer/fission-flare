@@ -18,19 +18,6 @@
 
 (: make-puzzle (-> (Listof (Listof Symbol)) (Listof Symbol) puzzle))
 (define (make-puzzle pattern queue)
-  (: parse-queue (-> (Listof Symbol) (Listof (Pairof Catalyst Catalyst))))
-  (define (parse-queue queue)
-    (match queue
-      [(list) (list)]
-      [(list a b rest ...)
-       (let ([left (parse-occupant a)]
-             [right (parse-occupant b)])
-         (when (or (not (catalyst? left))
-                   (not (catalyst? right)))
-           (fail "Invalid queue - contains non-catalyst:" left right))
-         (cons (cons left right) (parse-queue rest)))]
-      [(list a)
-       (fail "Invalid queue - odd number of occupants")]))
   (puzzle (parse-grid pattern) (parse-queue queue)))
 
 (define-syntax (parse-puzzles stx)

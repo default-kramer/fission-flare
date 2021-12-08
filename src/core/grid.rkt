@@ -1,8 +1,8 @@
 #lang typed/racket
 
 (provide grid-modifier GridModifier grid-fall grid-burst grid-destroy
-         grid-locs grid-count in-bounds? grid-clear
-         parse-grid print-grid parse-occupant
+         grid-locs grid-count in-bounds? grid-clear grid-shatter
+         parse-grid print-grid parse-occupant parse-queue
          )
 
 (require "data.rkt"
@@ -218,6 +218,22 @@
   (and any?
        (or (mod! 'build)
            (fail "grid-burst failed"))))
+
+(: grid-shatter (-> Grid Grid))
+; Separate all joined catalysts.
+; A human player can never do this.
+; This operation is only used by the AI to explore future possibilities.
+(define (grid-shatter grid)
+  (define mod! (grid-modifier grid))
+  (for ([loc (grid-locs grid)])
+    (let ([occ (grid-get grid loc)])
+      (when (and (catalyst? occ)
+                 (catalyst-direction occ))
+        (mod! 'remove loc)
+        (mod! 'set loc (struct-copy Catalyst occ
+                                    [direction #f])))))
+  (or (mod! 'build)
+      (fail "grid-shatter failed")))
 
 (: grid-after-destroy (-> Grid Grid))
 (define (grid-after-destroy grid)
@@ -452,6 +468,8 @@
       [sym : Symbol '(RR YY BB)])
   (add-parser sym (make-fuel color #f)))
 
+(add-parser '-- (ground))
+
 (: parse-occupant (-> Symbol (U #f Occupant)))
 (define (parse-occupant sym)
   (case sym
@@ -461,6 +479,20 @@
             (if result
                 (cdr result)
                 (fail "cannot parse:" sym)))]))
+
+(: parse-queue (-> (Listof Symbol) (Listof (Pairof Catalyst Catalyst))))
+(define (parse-queue queue)
+  (match queue
+    [(list) (list)]
+    [(list a b rest ...)
+     (let ([left (parse-occupant a)]
+           [right (parse-occupant b)])
+       (when (or (not (catalyst? left))
+                 (not (catalyst? right)))
+         (fail "Invalid queue - contains non-catalyst:" left right))
+       (cons (cons left right) (parse-queue rest)))]
+    [(list a)
+     (fail "Invalid queue - odd number of occupants")]))
 
 (: parse-grid (-> (Listof (Listof Symbol)) Grid))
 (define (parse-grid rows)
