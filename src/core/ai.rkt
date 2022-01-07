@@ -869,7 +869,7 @@
                (color-mismatch-penalty count))))]
          [analysis-b (grid-analysis grid-b)]
          [blockage-score
-          (fx* -10000 (hash-count (analysis-blockages analysis-b)))]
+          (fx* -100000 (hash-count (analysis-blockages analysis-b)))]
          [score (fxsum (list burst-score run-score
                              mismatch-score breathing-room-score
                              problem-score blockage-score
@@ -1466,5 +1466,53 @@
                            (y^ bb YY .. RR .. <b o>)
                            (y_ bb YY .. .. .. bb ..)
                            (-- -- -- -- -- -- -- --)))])
+    (check g1 > g2))
+
+  (let ([g1 (parse-grid '((.. .. .. .. .. .. .. ..)
+                          (.. .. .. .. .. .. .. ..)
+                          (.. .. .. .. .. .. .. ..)
+                          (.. .. .. .. .. .. .. ..)
+                          (.. .. .. .. .. .. .. ..)
+                          (.. b^ .. .. .. .. .. ..)
+                          (.. r_ .. .. .. .. .. ..)
+                          (.. <r o> .. .. .. .. ..)
+                          (<b r> .. .. .. .. .. ..)
+                          (bb .. .. .. .. .. .. BB)
+                          (BB .. .. y^ .. .. .. ..)
+                          (YY .. .. y_ .. .. .. BB)
+                          (RR rr .. YY .. <b y> YY)
+                          (BB BB .. .. .. <b y> ..)
+                          (.. BB YY YY .. BB .. RR)
+                          (RR .. BB .. .. YY .. BB)
+                          (BB .. RR YY .. BB YY YY)
+                          (YY RR RR YY .. RR BB RR)
+                          (RR BB .. BB .. RR .. ..)
+                          (BB RR BB .. YY BB YY RR)
+                          (.. .. BB YY RR RR .. RR)
+                          (-- -- -- -- -- -- -- --)))]
+        ; Regression: the AI was correctly penalizing the blockage in g2 but
+        ; not enough to overcome other factors.
+        [g2 (parse-grid '((.. .. .. .. .. .. .. ..)
+                          (.. .. .. .. .. .. .. ..)
+                          (.. .. .. .. .. .. .. ..)
+                          (.. .. .. .. .. .. .. ..)
+                          (.. .. .. .. .. .. .. ..)
+                          (.. .. .. .. .. .. .. ..)
+                          (<b r> .. .. .. .. .. ..)
+                          (.. <r o> .. .. .. .. ..)
+                          (<b r> .. .. .. .. .. ..)
+                          (bb .. .. .. .. .. .. BB)
+                          (BB .. .. y^ .. .. .. ..)
+                          (YY .. .. y_ .. .. .. BB)
+                          (RR rr .. YY .. <b y> YY)
+                          (BB BB .. .. .. <b y> ..)
+                          (.. BB YY YY .. BB .. RR)
+                          (RR .. BB .. .. YY .. BB)
+                          (BB .. RR YY .. BB YY YY)
+                          (YY RR RR YY .. RR BB RR)
+                          (RR BB .. BB .. RR .. ..)
+                          (BB RR BB .. YY BB YY RR)
+                          (.. .. BB YY RR RR .. RR)
+                          (-- -- -- -- -- -- -- --)))])
     (check g1 > g2))
   )

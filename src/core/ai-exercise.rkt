@@ -178,7 +178,7 @@
       (energy:initial . 40000)
       (energy:max . 40000)
       (energy:catalyst-cost . 250)
-      (energy:drain-rate . 5)
+      (energy:drain-rate . 0)
       (energy:combo-payout . #(0 200 500 1000 2000))
       (energy:fuel-value . 100)
       (energy:horizontal-bonus-factor . 20)
