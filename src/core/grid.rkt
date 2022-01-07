@@ -1,7 +1,7 @@
 #lang typed/racket
 
 (provide grid-modifier GridModifier grid-fall grid-burst grid-destroy
-         grid-locs grid-count in-bounds? grid-clear grid-shatter
+         grid-locs grid-count in-bounds? grid-clear
          parse-grid print-grid parse-occupant parse-queue
          )
 
@@ -218,22 +218,6 @@
   (and any?
        (or (mod! 'build)
            (fail "grid-burst failed"))))
-
-(: grid-shatter (-> Grid Grid))
-; Separate all joined catalysts.
-; A human player can never do this.
-; This operation is only used by the AI to explore future possibilities.
-(define (grid-shatter grid)
-  (define mod! (grid-modifier grid))
-  (for ([loc (grid-locs grid)])
-    (let ([occ (grid-get grid loc)])
-      (when (and (catalyst? occ)
-                 (catalyst-direction occ))
-        (mod! 'remove loc)
-        (mod! 'set loc (struct-copy Catalyst occ
-                                    [direction #f])))))
-  (or (mod! 'build)
-      (fail "grid-shatter failed")))
 
 (: grid-after-destroy (-> Grid Grid))
 (define (grid-after-destroy grid)
@@ -532,3 +516,25 @@
          [grid (parse-grid pattern)]
          [p2 (print-grid grid)])
     (check-equal? pattern p2)))
+
+
+(: grid-vertical-divorce (-> Grid Grid))
+; If we rotate a <y r> by 90 degrees in either direction and place it on a grid,
+; we can divorce the two halves and it will make no difference as the
+; game continues. For example, the following
+#;([.. y^ ..]
+   [.. r_ ..]
+   [anything])
+; is completely equivalent to the divorced version
+#;([.. yy ..]
+   [.. rr ..]
+   [anything])
+; because if the rr drops one cell, the yy will also drop one cell.
+; And if the yy is destroyed, the rr is what would be left over anyway.
+; And if both are destroyed, it obviously doesn't matter anymore.
+; This is still true with blanks.
+; Normalizing to the divorced version could make analysis easier, because we
+; have to handle singles like yy and rr no matter what.
+; Also, typing y^ is harder than typing yy.
+(define (grid-vertical-divorce g)
+  (error "not implemented"))

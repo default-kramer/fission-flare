@@ -321,7 +321,14 @@
 (define-type Blockages (Immutable-HashTable (Pairof Loc Loc)
                                             (Pairof Loc Loc)))
 
+(struct column-stats
+  ([color-mismatch-count : Fixnum] ; how many color mismatches exist?
+   [peak : Loc])
+  #:type-name ColumnStats
+  #:transparent)
+
 (struct analysis ([grid : Grid]
+                  [column-stats : (Vectorof ColumnStats)]
                   [pillars : (Matrixof (U #f Pillar))]
                   [dependencies : Deps]
                   [blockages : Blockages])
@@ -332,11 +339,13 @@
 (define (analysis-pillar a loc)
   (matrix-get (analysis-pillars a) loc))
 
-(: find-pillars (-> Grid (Matrixof (U #f Pillar))))
+(: find-pillars (-> Grid (List (Matrixof (U #f Pillar))
+                               (Vectorof ColumnStats))))
 (define (find-pillars [grid : Grid])
   (define w (grid-width grid))
   (define h (grid-height grid))
   (define matrix (make-matrix w h (ann #f (U #f Pillar))))
+  (define stats : (Listof ColumnStats) '())
 
   (: pillar-end (-> Integer Integer Color Loc))
   (define (pillar-end x y color)
@@ -357,10 +366,22 @@
 
   (for ([x (in-range w)])
     (define current-pillar : (U #f Pillar) #f)
+    (define color-mismatch-counter : (Pairof Color Fixnum) (cons #f 0))
+    (define peak : Loc (make-loc x 0))
     (for ([y (in-range h)])
       (let* ([loc (make-loc x y)]
              [occ (grid-get grid loc)]
              [cp current-pillar])
+        ; Update column stats
+        (when occ
+          (set! peak loc)
+          (let* ([color (occupant-color occ)])
+            (when (and color
+                       (not (equal? color (car color-mismatch-counter))))
+              (set! color-mismatch-counter
+                    (cons color
+                          (fx+ 1 (cdr color-mismatch-counter)))))))
+        ; Do pillar logic
         (when cp
           (if (pillar-contains? cp loc)
               (matrix-set! matrix loc cp)
@@ -373,8 +394,11 @@
                               (and (not (can-burst? occ))
                                    (is-stable? x (sub1 y))))])
             (set! current-pillar (pillar start end color stable?))
-            (matrix-set! matrix loc current-pillar))))))
-  matrix)
+            (matrix-set! matrix loc current-pillar)))))
+    (set! stats (cons (column-stats (cdr color-mismatch-counter) peak)
+                      stats)))
+  (list matrix
+        (list->vector (reverse stats))))
 
 (: find-deps (-> Grid (-> Loc Boolean) Deps))
 (define (find-deps grid stable?)
@@ -439,13 +463,14 @@
     (make-immutable-hash blocks)))
 
 (define (grid-analysis [grid : Grid])
-  (define pillars (find-pillars grid))
+  (define result (find-pillars grid))
+  (define pillars (first result))
   (define (stable? [loc : Loc])
     (let* ([pillar (matrix-get pillars loc)])
       (and pillar (pillar-stable? pillar))))
   (define deps (find-deps grid stable?))
   (define blockages (find-blockages grid pillars deps))
-  (analysis grid pillars deps blockages))
+  (analysis grid (second result) pillars deps blockages))
 
 
 ; These "check-" functions are just to help the test submodule.
@@ -706,10 +731,38 @@
         #;[(and (catalyst? occ)
                 (not (catalyst-color occ)))
            #t]
-        [(and ((length vr) . < . 4)
-              ((length vbr) . > . (length vr)))
-         #t]
+        ; TODO I think this has become "column-has-blank?" now?
+        ; Uncommenting this causes silly play:
+        #;[(and ((length vr) . < . 4)
+                ((length vbr) . > . (length vr)))
+           #t]
         [else #f]))))
+
+(: color-mismatch-penalty (-> Fixnum Fixnum))
+(define (color-mismatch-penalty [mismatch-count : Fixnum])
+  (case mismatch-count
+    ((0) 0)
+    ((1) -1)
+    ((2) -3)
+    ((3) -6)
+    ((4) -10)
+    ((5) -15)
+    ((6) -21)
+    ((7) -28)
+    ((8) -36)
+    ((9) -45)
+    ((10) -55)
+    ((11) -66)
+    ((12) -78)
+    ((13) -91)
+    ((14) -105)
+    ((15) -120)
+    ((16) -136)
+    ((17) -153)
+    ((18) -171)
+    ((19) -190)
+    ((20) -210)
+    [else (fail "unexpected mismatch-count" mismatch-count)]))
 
 (define explain-score? : (Parameterof Boolean) (make-parameter #f))
 
@@ -718,6 +771,8 @@
   (let* ([width (grid-width grid)]
          [(grid-a _)
           (grid-resolve grid '())]
+         [analysis-a (grid-analysis grid-a)]
+         [column-stats-a (analysis-column-stats analysis-a)]
          [res-a (analyze grid-a)]
          [cols-a (first res-a)]
          [runs-a (second res-a)]
@@ -729,6 +784,21 @@
          [cols-b (first res-b)]
          [runs-b (second res-b)]
          [broken-runs-b (third res-b)]
+         [analysis-b (grid-analysis grid-b)]
+         [column-stats-b (analysis-column-stats analysis-b)]
+         [breathing-room-score
+          (fxsum
+           (for/list ([x (in-range width)])
+             (let* ([stats (vector-ref column-stats-a x)]
+                    [y (loc-y (column-stats-peak stats))]
+                    [y (- (grid-height grid) y)])
+               (case y
+                 [(0) (fail "impossible:" y)]
+                 [(1) 0]
+                 [(2) 1000]
+                 [(3) 3000]
+                 [(4) 6000]
+                 [else 10000]))))]
          [burst-score
           (fxsum
            (for/list ([loc (grid-locs grid)])
@@ -763,9 +833,9 @@
                     [has-fuel? (ormap fuel? occs)]
                     [count (length run)])
                (case count
-                 [(1) -10]
-                 [(2) -7]
-                 [(3) -2]
+                 [(1) -20]
+                 [(2) -14]
+                 [(3) -4]
                  [else 0]))))]
          [problem-score
           (fxsum
@@ -791,15 +861,24 @@
            (for/list ([x (in-range width)])
              (let ([col (vector-ref cols-a x)])
                (if (peak-broken? grid-a x col) 50 0))))]
+         [mismatch-score
+          (fxsum
+           (for/list ([x (in-range width)])
+             (let* ([stats (vector-ref column-stats-b x)]
+                    [count (column-stats-color-mismatch-count stats)])
+               (color-mismatch-penalty count))))]
          [analysis-b (grid-analysis grid-b)]
          [blockage-score
           (fx* -10000 (hash-count (analysis-blockages analysis-b)))]
          [score (fxsum (list burst-score run-score
+                             mismatch-score breathing-room-score
                              problem-score blockage-score
                              fuel-score broken-peak-score))])
     (when (explain-score?)
       (println (list "burst:" burst-score
                      "run:" run-score
+                     "mismatch:" mismatch-score
+                     "breathing room:" breathing-room-score
                      "problem:" problem-score
                      "blockage:" blockage-score
                      "fuel:" fuel-score
@@ -1148,16 +1227,25 @@
   ; The sideways blank in g1 is preferred over the vertical blank in g2 and g3
   ; because both runs are now broken instead of just the red one.
   (let ([g1 (parse-grid '([.. .. ..]
+                          [.. .. ..]
+                          [.. .. ..]
+                          [.. .. ..]
                           [.. <o r>]
                           [.. YY ..]
                           [.. YY RR]
                           [.. YY RR]))]
         [g2 (parse-grid '([.. .. ..]
+                          [.. .. ..]
+                          [.. .. ..]
+                          [.. .. ..]
                           [.. .. o^]
                           [.. YY r_]
                           [.. YY RR]
                           [.. YY RR]))]
         [g3 (parse-grid '([.. .. ..]
+                          [.. .. ..]
+                          [.. .. ..]
+                          [.. .. ..]
                           [.. .. r^]
                           [.. YY o_]
                           [.. YY RR]
@@ -1280,5 +1368,103 @@
                           [r_ .. .. b_ ..]
                           [RR .. .. BB ..]
                           [YY BB .. BB ..]))])
+    (check g1 > g2))
+
+  (let ([g1 (parse-grid '((.. .. .. .. .. .. .. ..)
+                          (.. .. .. .. .. .. .. ..)
+                          (.. .. .. .. .. .. .. ..)
+                          (.. .. .. .. .. .. .. ..)
+                          (.. .. .. .. .. .. .. ..)
+                          (.. .. .. .. .. <y b> ..)
+                          (.. .. .. .. .. .. <b r>)
+                          (.. <r r> y^ .. .. <b r>)
+                          (.. <o r> y_ .. <b y> ..)
+                          (.. RR <o y> .. b^ .. ..)
+                          (.. .. RR .. .. o_ .. ..)
+                          (.. RR RR .. .. BB .. RR)
+                          (.. .. .. YY rr BB .. ..)
+                          (.. .. RR .. rr .. .. RR)
+                          (-- -- -- -- -- -- -- --)))]
+        [g2 (parse-grid '((.. .. .. .. .. .. .. ..)
+                          (.. .. .. .. .. .. .. ..)
+                          (.. .. .. .. .. .. .. ..)
+                          (.. .. .. .. .. .. .. ..)
+                          (.. .. .. .. .. .. y^ ..)
+                          (.. .. .. .. .. .. b_ ..)
+                          (.. .. .. .. .. .. <b r>)
+                          (.. <r r> y^ .. .. <b r>)
+                          (.. <o r> y_ .. <b y> ..)
+                          (.. RR <o y> .. b^ .. ..)
+                          (.. .. RR .. .. o_ .. ..)
+                          (.. RR RR .. .. BB .. RR)
+                          (.. .. .. YY rr BB .. ..)
+                          (.. .. RR .. rr .. .. RR)
+                          (-- -- -- -- -- -- -- --)))])
+    (check g1 > g2))
+
+  (let ([g1 (parse-grid '((.. .. .. .. .. .. .. ..)
+                          (.. .. .. .. .. .. .. ..)
+                          (.. .. <y y> .. .. .. ..)
+                          (<b o> <o y> b^ .. .. ..)
+                          (.. <b y> .. b_ .. .. ..)
+                          (.. <r o> .. b^ .. .. y^)
+                          (<b r> .. .. b_ .. .. y_)
+                          (y^ .. .. .. b^ r^ .. y^)
+                          (o_ .. .. .. r_ r_ .. r_)
+                          (yy .. YY .. <r y> .. r^)
+                          (yy .. .. .. <r y> .. b_)
+                          (YY rr .. <y b> .. <r b>)
+                          (.. rr .. yy .. .. r^ ..)
+                          (.. rr .. YY .. yy r_ ..)
+                          (-- -- -- -- -- -- -- --)))]
+        [g2 (parse-grid '((.. .. .. .. .. .. .. ..)
+                          (.. .. .. .. .. .. .. ..)
+                          (.. .. <y y> .. .. .. ..)
+                          (<b o> <o y> .. .. .. ..)
+                          (.. <b y> .. .. .. .. ..)
+                          (.. <r o> .. b^ .. .. y^)
+                          (<b r> .. .. b_ .. .. y_)
+                          (y^ .. .. .. b^ r^ .. y^)
+                          (o_ .. .. .. r_ r_ .. r_)
+                          (yy .. YY .. <r y> b^ r^)
+                          (yy .. .. .. <r y> b_ b_)
+                          (YY rr .. <y b> .. <r b>)
+                          (.. rr .. yy .. .. r^ ..)
+                          (.. rr .. YY .. yy r_ ..)
+                          (-- -- -- -- -- -- -- --)))])
+    (check g1 > g2))
+
+  (let* ([g1 (parse-grid '((.. .. .. .. .. .. .. ..)
+                           (.. .. .. .. .. .. .. ..)
+                           (.. .. .. <y b> .. .. ..)
+                           (.. .. .. <y r> .. .. ..)
+                           (.. .. <y o> .. .. .. ..)
+                           (.. .. y^ .. .. .. .. ..)
+                           (r^ .. b_ .. .. <o y> ..)
+                           (b_ <o b> .. .. <r y> ..)
+                           (b^ b^ .. .. r^ b^ r^ ..)
+                           (b_ y_ .. .. o_ b_ r_ ..)
+                           (b^ yy bb .. <r b> r^ ..)
+                           (y_ bb BB YY <r y> b_ ..)
+                           (y^ bb YY .. RR .. <b o>)
+                           (y_ bb YY .. .. .. bb ..)
+                           (-- -- -- -- -- -- -- --)))]
+         [g1 (or (grid-burst g1) g1)]
+         [(g1 groups) (grid-resolve g1 '())]
+         [g2 (parse-grid '((.. .. .. .. .. .. .. ..)
+                           (.. .. .. .. .. .. .. ..)
+                           (.. .. .. <y b> .. .. ..)
+                           (.. .. .. <y r> .. .. ..)
+                           (.. .. <y o> .. .. .. ..)
+                           (.. .. y^ .. .. .. .. ..)
+                           (b^ .. b_ .. .. <o y> ..)
+                           (r_ <o b> .. .. <r y> ..) ; WTF in leftmost column??
+                           (b^ b^ .. .. r^ b^ r^ ..)
+                           (b_ y_ .. .. o_ b_ r_ ..)
+                           (b^ yy bb .. <r b> r^ ..)
+                           (y_ bb BB YY <r y> b_ ..)
+                           (y^ bb YY .. RR .. <b o>)
+                           (y_ bb YY .. .. .. bb ..)
+                           (-- -- -- -- -- -- -- --)))])
     (check g1 > g2))
   )
