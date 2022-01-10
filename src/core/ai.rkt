@@ -1,6 +1,9 @@
 #lang typed/racket
 
-(provide choose-move)
+;(provide choose-move)
+(provide (rename-out [get-plan choose-move]))
+(module+ exercise-help
+  (provide fast-forward))
 
 (require racket/fixnum
          "../typed-utils.rkt"
@@ -312,6 +315,11 @@
     (and (= (loc-x lo) (loc-x loc))
          (<= (loc-y lo) (loc-y loc) (loc-y hi)))))
 
+(: pillar-length (-> Pillar Fixnum))
+(define (pillar-length p)
+  (fx+ 1 (fx- (loc-y (pillar-hi p))
+              (loc-y (pillar-lo p)))))
+
 ; The dependency [B3 A3] (or "B3 depends on A3") would be stored in this hash
 ; with a Key of B3 and a Value of A3.
 (define-type Deps (Immutable-HashTable Loc Loc))
@@ -338,6 +346,28 @@
 (: analysis-pillar (-> Analysis Loc (U #f Pillar)))
 (define (analysis-pillar a loc)
   (matrix-get (analysis-pillars a) loc))
+
+(: column-danger (-> Analysis Integer Fixnum))
+(define (column-danger analysis x)
+  (let* ([stats (analysis-column-stats analysis)]
+         [stats (vector-ref stats x)]
+         [peak (column-stats-peak stats)]
+         [pillar (analysis-pillar analysis peak)]
+         #:break (when (not pillar) 0)
+         ; assuming group of 4 will destroy:
+         [needed (fx- 4 (pillar-length pillar))]
+         [height (grid-height (analysis-grid analysis))]
+         ; TODO the grid has 2 empty top rows, should redo this
+         ; for grep: mover-reserved-rows
+         [height (fx- height 2)]
+         [space (fx- height (loc-y peak))]
+         [room (fx- space needed)])
+    (if (room . fx< . 1)
+        -1001001
+        (case room
+          [(1 2 3) -10000]
+          [(4 5 6 7) -5000]
+          [else 0]))))
 
 (: find-pillars (-> Grid (List (Matrixof (U #f Pillar))
                                (Vectorof ColumnStats))))
@@ -391,6 +421,7 @@
                  [color (occupant-color occ)]
                  [end (pillar-end x (add1 y) color)]
                  [stable? (or (fuel? occ)
+                              (ground? occ)
                               (and (not (can-burst? occ))
                                    (is-stable? x (sub1 y))))])
             (set! current-pillar (pillar start end color stable?))
@@ -600,16 +631,34 @@
     (loc-y (car x)))
 
   (: fuel-below? (-> Integer Integer Boolean))
+  ; TODO could use some caching/dynamic programming here...
+  ; Should get migrated to the new Analysis anyway.
   (define (fuel-below? [x : Integer] [y : Integer])
+    (define (key-point? [x : Integer] [y : Integer])
+      (and (not (grid-get grid (make-loc x y)))
+           (fuel-below? x (sub1 y))))
     (if (y . < . 0)
         #f
-        (or (fuel? (grid-get grid (make-loc x y)))
-            (fuel-below? x (sub1 y)))))
+        (let ([occ (grid-get grid (make-loc x y))])
+          (or (fuel? occ)
+              (fuel-below? x (sub1 y))
+              (and (catalyst? occ)
+                   (case (catalyst-direction occ)
+                     [(l) (key-point? (sub1 x) (sub1 y))]
+                     [(r) (key-point? (add1 x) (sub1 y))]
+                     [else #f]))))))
 
-  (let* ([ys (map get-y run)]
-         [y (sub1 (apply min ys))]
-         [x (loc-x (car (car run)))])
-    (fuel-below? x y)))
+  (or (has-fuel? run)
+      (let* ([ys (map get-y run)]
+             [y (sub1 (apply min ys))]
+             [x (loc-x (car (car run)))]
+             ; This `tall?` was introduced to stop the AI from building towers.
+             ; I would think that other measurements (like danger) would make
+             ; this obsolete, but mini layouts (and maybe standard) perform
+             ; better with this check intact:
+             [tall?
+              ((apply max ys) . > . (/ (grid-height grid) 2))])
+        (or tall? (fuel-below? x y)))))
 
 (: fxsum (-> (Listof Fixnum) Fixnum))
 (define (fxsum nums)
@@ -742,29 +791,36 @@
 (define (color-mismatch-penalty [mismatch-count : Fixnum])
   (case mismatch-count
     ((0) 0)
-    ((1) -1)
-    ((2) -3)
-    ((3) -6)
-    ((4) -10)
-    ((5) -15)
-    ((6) -21)
-    ((7) -28)
-    ((8) -36)
-    ((9) -45)
-    ((10) -55)
-    ((11) -66)
-    ((12) -78)
-    ((13) -91)
-    ((14) -105)
-    ((15) -120)
-    ((16) -136)
-    ((17) -153)
-    ((18) -171)
-    ((19) -190)
-    ((20) -210)
+    ((1) -100)
+    ((2) -300)
+    ((3) -600)
+    ((4) -1000)
+    ((5) -1500)
+    ((6) -2100)
+    ((7) -2800)
+    ((8) -3600)
+    ((9) -4500)
+    ((10) -5500)
+    ((11) -6600)
+    ((12) -7800)
+    ((13) -9100)
+    ((14) -10500)
+    ((15) -12000)
+    ((16) -13600)
+    ((17) -15300)
+    ((18) -17100)
+    ((19) -19000)
+    ((20) -21000)
     [else (fail "unexpected mismatch-count" mismatch-count)]))
 
 (define explain-score? : (Parameterof Boolean) (make-parameter #f))
+
+(: score (-> (U State Grid Possibility) Fixnum))
+(define (score x)
+  (grid-score (cond
+                [(grid? x) x]
+                [(state? x) (state-grid x)]
+                [else (state-grid (car x))])))
 
 (: grid-score (-> Grid Fixnum))
 (define (grid-score grid)
@@ -786,6 +842,8 @@
          [broken-runs-b (third res-b)]
          [analysis-b (grid-analysis grid-b)]
          [column-stats-b (analysis-column-stats analysis-b)]
+         ; Even though we have danger, this breathing room helps mini layouts
+         ; a little and standard layouts a lot (>700 energy).
          [breathing-room-score
           (fxsum
            (for/list ([x (in-range width)])
@@ -825,37 +883,23 @@
                       [(3) (fx* 20 diff)]
                       [else (fail "impossible, right?")]))]
                  [else 0]))))]
-         [run-score
-          (fxsum
-           (for/list ([run : Run runs-b])
-             (let* ([occs : (Listof Occupant) (map (lambda ([x : (Pairof Loc Occupant)])
-                                                     (cdr x)) run)]
-                    [has-fuel? (ormap fuel? occs)]
-                    [count (length run)])
-               (case count
-                 [(1) -20]
-                 [(2) -14]
-                 [(3) -4]
-                 [else 0]))))]
          [problem-score
           (fxsum
            (for/list ([run : Run broken-runs-b])
              (if (problematic? run grid-b)
                  (case (length run)
-                   [(1) -30000]
-                   [(2) -20000]
-                   [(3) -10000]
+                   [(1) -60000]
+                   [(2) -50000]
+                   [(3) -30000]
                    [else 0])
-                 0)))]
-         [fuel-score
-          (fxsum (for/list ([run runs-b])
-                   (if (has-fuel? run)
-                       (case (length run)
-                         [(1) -3000]
-                         [(2) -2000]
-                         [(3) -1000]
-                         [else 0])
-                       0)))]
+                 (case (length run)
+                   [(1) -6000]
+                   [(2) -5000]
+                   [(3) -3000]
+                   [else 0]))))]
+         [danger-score
+          (fxsum (for/list ([x (in-range width)])
+                   (column-danger analysis-b x)))]
          [broken-peak-score
           (fxsum
            (for/list ([x (in-range width)])
@@ -870,26 +914,33 @@
          [analysis-b (grid-analysis grid-b)]
          [blockage-score
           (fx* -100000 (hash-count (analysis-blockages analysis-b)))]
-         [score (fxsum (list burst-score run-score
+         [score (fxsum (list burst-score
                              mismatch-score breathing-room-score
-                             problem-score blockage-score
-                             fuel-score broken-peak-score))])
+                             problem-score danger-score
+                             blockage-score broken-peak-score))])
     (when (explain-score?)
       (println (list "burst:" burst-score
-                     "run:" run-score
                      "mismatch:" mismatch-score
                      "breathing room:" breathing-room-score
                      "problem:" problem-score
+                     "danger:" danger-score
                      "blockage:" blockage-score
-                     "fuel:" fuel-score
                      "broken peak:" broken-peak-score
                      "total:" score)))
     score))
 
 (define-type MoveSeq (Listof Action))
 
-; A Possibility is a reachable state plus the sequence that reaches it
+; A Possibility (or "possi") is a reachable state.
+; (Hmm... perhaps we should also hold the starting state?)
 (define-type Possibility (List State MoveSeq))
+(define possi-state (ann first (-> Possibility State)))
+
+; A Choice is a Possibility that has been scored
+(define-type Choice (Pairof Fixnum Possibility))
+(define choice-score (ann first (-> Choice Fixnum)))
+(define choice-state (ann second (-> Choice State)))
+(define choice-possi (ann cdr (-> Choice Possibility)))
 
 (: get-rotations (-> State (Listof Possibility)))
 (define (get-rotations state)
@@ -928,7 +979,7 @@
     (and new-state
          (list new-state (append old-seq new-seq)))))
 
-(: foo (-> Action Boolean (-> Possibility (Listof Possibility))))
+(: foo (-> (U Action (Listof Action)) Boolean (-> Possibility (Listof Possibility))))
 (define (foo action repeat?)
   (: go (-> Possibility (Listof Possibility)))
   (define (go [poss : Possibility])
@@ -991,6 +1042,94 @@
         (pretty-print (print-grid (state-grid state)))
         (pretty-print (print-grid (state-grid (car result)))))
     result))
+
+(: catalyst-positions (-> State (Listof Possibility)))
+; Returns all possible positions for the catalyst, but do not decide yet
+; whether we will plummet or burst.
+(define (catalyst-positions state)
+  (let ([rots (get-rotations state)])
+    (append rots
+            (flatmap (foo (move 'l) #t) rots)
+            (flatmap (foo (move 'r) #t) rots))))
+
+(: fast-forward (-> State State))
+(define (fast-forward state)
+  (let* ([result (state-apply state (list (tick)))]
+         [new-state (car result)])
+    (if new-state
+        (fast-forward new-state)
+        state)))
+
+(: choose-single-move (-> State (U 'plummet 'burst) (U #f Choice)))
+; Evaluates all possible moves and returns the best-scoring one
+(define (choose-single-move state kind)
+  (let* ([state (fast-forward state)]
+         #:break (when (state-game-over? state) #f)
+         [actions (case kind
+                    [(plummet) (list (plummet))]
+                    [(burst) (list (plummet) (burst))])]
+         [possis (flatmap (foo actions #f) (catalyst-positions state))]
+         [choices (map (lambda ([p : Possibility])
+                         (ann (cons (score p) p) Choice))
+                       possis)]
+         #:break (when (empty? choices) #f)
+         [car* (ann car (-> Choice Fixnum))])
+    (argmax car* choices)))
+
+(: count-groups (-> State Integer))
+(define (count-groups state)
+  (let* ([(grid groups)
+          (grid-resolve (state-grid state) '())])
+    (length groups)))
+
+(: get-plan (-> State (U #f Possibility)))
+(define (get-plan state)
+  ; Naming convention for this function:
+  ;  p means "ply 1 plummet"
+  ;  b means "ply 1 burst"
+  ;  pb means "ply 1 plummet, then ply 2 burst"
+  ;  bp means "ply 1 burst, then ply 2 plummet"
+  ; If b is impossible we know that p is our only choice.
+  ; If bp outscores pb that means that we should burst in ply 1 because it
+  ; will allow us to make a better move in ply 2.
+  ; Otherwise bursting in ply 1 is premature.
+  (let* ([p (choose-single-move state 'plummet)]
+         #:break (when (not p) #f)
+         [b (try (choice-possi p) (burst))]
+         #:break (when (not b)
+                   ; Can't burst in ply 1, just plummet:
+                   (choice-possi p))
+         [p : Choice p] ; we needed to score p in order to choose it
+         [b : Possibility b] ; but we might never need to score b
+         ; If p has any destruction groups and b has even more, use b
+         [p-group-count (count-groups (choice-state p))]
+         [b-group-count (count-groups (possi-state b))]
+         #:break (when (and (p-group-count . > . 0)
+                            (b-group-count . > . p-group-count))
+                   b)
+         [b-state (possi-state b)]
+         [b-state (fast-forward b-state)]
+         #:break (when (case (state-game-over? b-state)
+                         [(win) #t]
+                         [else #f])
+                   ; A ply 1 burst wins the game, do it:
+                   b)
+         [pb (choose-single-move (choice-state p) 'burst)]
+         [bp (choose-single-move (possi-state b) 'plummet)])
+    (if (and pb bp)
+        ; This return value discards the 2nd ply analysis because I don't
+        ; want to change the calling code right now. This is an obvious
+        ; potential performance improvement.
+        ; (In fact, maybe `get-plan` should keep choosing moves until it
+        ;  chooses a burst.)
+        (let ([diff (- (choice-score bp) (choice-score pb))])
+          (if (diff . > . 200)
+              (begin ;(println (format "proactive burst benefit: ~a" diff))
+                b)
+              (choice-possi p)))
+        (if ((score b) . > . (choice-score p))
+            b
+            (choice-possi p)))))
 
 (module+ test
   ; fast-forward until the state accepts input
@@ -1115,38 +1254,39 @@
                           (-- -- -- -- -- -- -- --)))])
     (check g1 > g2))
 
-  (let* ([g1 (parse-grid '((.. .. .. .. .. .. .. ..)
-                           (.. .. .. .. .. .. .. ..)
-                           (.. .. .. .. .. .. .. ..)
-                           (.. .. .. .. .. .. .. ..)
-                           (.. .. .. .. .. .. .. ..)
-                           (.. .. .. .. .. .. .. ..)
-                           (.. .. .. .. .. .. .. ..)
-                           (.. .. .. .. .. .. .. ..)
-                           (y^ .. .. .. .. .. .. ..)
-                           (y_ BB .. .. YY .. .. ..)
-                           (YY .. .. .. YY RR .. BB)
-                           (.. .. .. RR .. RR .. ..)
-                           (.. .. .. .. .. YY .. ..)
-                           (.. BB .. .. .. .. BB ..)
-                           (-- -- -- -- -- -- -- --)))]
-         ; We favor going from 1 to 3 over going from 2 to 4 (non-latent of course)
-         [g2 (parse-grid '((.. .. .. .. .. .. .. ..)
-                           (.. .. .. .. .. .. .. ..)
-                           (.. .. .. .. .. .. .. ..)
-                           (.. .. .. .. .. .. .. ..)
-                           (.. .. .. .. .. .. .. ..)
-                           (.. .. .. .. .. .. .. ..)
-                           (.. .. .. .. .. .. .. ..)
-                           (.. .. .. .. y^ .. .. ..)
-                           (.. .. .. .. y_ .. .. ..)
-                           (.. BB .. .. YY .. .. ..)
-                           (YY .. .. .. YY RR .. BB)
-                           (.. .. .. RR .. RR .. ..)
-                           (.. .. .. .. .. YY .. ..)
-                           (.. BB .. .. .. .. BB ..)
-                           (-- -- -- -- -- -- -- --)))])
-    (check g1 > g2))
+  ; TODO is this a good test?
+  #;(let* ([g1 (parse-grid '((.. .. .. .. .. .. .. ..)
+                             (.. .. .. .. .. .. .. ..)
+                             (.. .. .. .. .. .. .. ..)
+                             (.. .. .. .. .. .. .. ..)
+                             (.. .. .. .. .. .. .. ..)
+                             (.. .. .. .. .. .. .. ..)
+                             (.. .. .. .. .. .. .. ..)
+                             (.. .. .. .. .. .. .. ..)
+                             (y^ .. .. .. .. .. .. ..)
+                             (y_ BB .. .. YY .. .. ..)
+                             (YY .. .. .. YY RR .. BB)
+                             (.. .. .. RR .. RR .. ..)
+                             (.. .. .. .. .. YY .. ..)
+                             (.. BB .. .. .. .. BB ..)
+                             (-- -- -- -- -- -- -- --)))]
+           ; We favor going from 1 to 3 over going from 2 to 4 (non-latent of course)
+           [g2 (parse-grid '((.. .. .. .. .. .. .. ..)
+                             (.. .. .. .. .. .. .. ..)
+                             (.. .. .. .. .. .. .. ..)
+                             (.. .. .. .. .. .. .. ..)
+                             (.. .. .. .. .. .. .. ..)
+                             (.. .. .. .. .. .. .. ..)
+                             (.. .. .. .. .. .. .. ..)
+                             (.. .. .. .. y^ .. .. ..)
+                             (.. .. .. .. y_ .. .. ..)
+                             (.. BB .. .. YY .. .. ..)
+                             (YY .. .. .. YY RR .. BB)
+                             (.. .. .. RR .. RR .. ..)
+                             (.. .. .. .. .. YY .. ..)
+                             (.. BB .. .. .. .. BB ..)
+                             (-- -- -- -- -- -- -- --)))])
+      (check g1 > g2))
 
   (let* ([g1 (parse-grid '((.. .. .. .. .. .. .. ..)
                            (.. .. .. .. .. .. .. ..)
@@ -1309,33 +1449,6 @@
                             [.. .. .. BB]
                             [.. .. .. ..]
                             [.. .. YY BB]))])
-      (check g1 > g2))
-
-  ; TODO fix and uncomment this one
-  #;(let ([g1 (parse-grid '([.. .. .. ..]
-                            [.. .. .. ..]
-                            [.. .. .. ..]
-                            [.. .. .. ..]
-                            [.. .. .. ..]
-                            [.. .. .. ..]
-                            [r^ .. .. ..]
-                            [r_ rr .. RR]))]
-          ; g1 bursted, g2 did not.
-          ; We don't want to burst prematurely, but in this case we need to recognize
-          ; that not bursting is causing us to be unable to do anything useful.
-          ; THINK should this be handled by grid-score, or would simply going to a 2-ply
-          ; analysis fix it? It wouldn't even have to be a full 2-ply, it could be
-          ; that after we pick our favorite move we back up and say, "okay, let's
-          ; consider burst vs plummet and see which is better after one more ply."
-          ; OR maybe my recent scoring adjustment has naturally fixed this?
-          [g2 (parse-grid '([.. .. <y b>]
-                            [.. <r y> ..]
-                            [.. .. <y o>]
-                            [.. .. .. bb]
-                            [.. .. .. bb]
-                            [.. .. YY BB]
-                            [r^ .. .. ..]
-                            [r_ .. .. RR]))])
       (check g1 > g2))
 
   ; Never create a blockage!!
@@ -1515,4 +1628,312 @@
                           (.. .. BB YY RR RR .. RR)
                           (-- -- -- -- -- -- -- --)))])
     (check g1 > g2))
-  )
+
+  (let ([g1 (parse-grid '([.. .. .. ..]
+                          [.. .. .. ..]
+                          [.. .. .. ..]
+                          [.. .. .. ..]
+                          [.. .. .. ..]
+                          [.. .. <y r>]
+                          [.. .. .. rr]
+                          [.. .. .. rr]
+                          [.. .. .. bb]
+                          [.. .. YY BB]
+                          [RR YY .. ..]
+                          [YY RR BB YY]))]
+        ; Even though we are not immediately clearing the problem on the right
+        ; side, it is still important to make progress.
+        ; (The next test contains a real-game example of this.)
+        [g2 (parse-grid '([.. .. .. ..]
+                          [.. .. .. ..]
+                          [.. .. .. ..]
+                          [.. .. .. ..]
+                          [.. .. .. ..]
+                          [.. .. .. ..]
+                          [.. .. .. rr]
+                          [.. .. .. rr]
+                          [.. .. .. bb]
+                          [<r y> YY BB]
+                          [RR YY .. ..]
+                          [YY RR BB YY]))])
+    (check g1 > g2))
+
+  (let ([g1 (parse-grid '((.. .. .. .. .. .. .. ..)
+                          (.. .. .. .. .. .. .. ..)
+                          (.. .. .. .. .. .. .. ..)
+                          (.. .. .. .. .. .. .. ..)
+                          (.. .. .. .. .. .. .. ..)
+                          (.. .. <y r> .. .. .. ..)
+                          (.. .. .. rr .. .. .. ..)
+                          (.. .. .. r^ .. .. .. ..)
+                          (.. r^ .. y_ .. .. bb ..)
+                          (.. b_ .. YY .. .. bb ..)
+                          (.. bb .. .. .. YY BB ..)
+                          (.. bb .. RR .. RR YY ..)
+                          (.. rr .. YY RR BB YY bb)
+                          (BB rr .. .. YY RR BB bb)
+                          (YY BB YY .. BB BB YY BB)
+                          (BB .. BB RR YY RR YY RR)
+                          (YY BB BB RR RR BB RR YY)
+                          (RR YY RR YY RR YY BB RR)
+                          (BB .. BB YY YY RR .. ..)
+                          (RR BB YY .. RR YY BB BB)
+                          (BB .. RR RR .. .. .. ..)
+                          (-- -- -- -- -- -- -- --)))]
+        [g2 (parse-grid '((.. .. .. .. .. .. .. ..)
+                          (.. .. .. .. .. .. .. ..)
+                          (.. .. .. .. .. .. .. ..)
+                          (.. .. .. .. .. .. .. ..)
+                          (.. .. .. .. .. .. .. ..)
+                          (.. .. .. .. .. .. .. ..)
+                          (.. .. .. rr .. .. .. ..)
+                          (.. .. .. r^ .. .. .. ..)
+                          (.. r^ .. y_ .. .. bb ..)
+                          (.. b_ .. YY <r y> bb ..)
+                          (.. bb .. .. .. YY BB ..)
+                          (.. bb .. RR .. RR YY ..)
+                          (.. rr .. YY RR BB YY bb)
+                          (BB rr .. .. YY RR BB bb)
+                          (YY BB YY .. BB BB YY BB)
+                          (BB .. BB RR YY RR YY RR)
+                          (YY BB BB RR RR BB RR YY)
+                          (RR YY RR YY RR YY BB RR)
+                          (BB .. BB YY YY RR .. ..)
+                          (RR BB YY .. RR YY BB BB)
+                          (BB .. RR RR .. .. .. ..)
+                          (-- -- -- -- -- -- -- --)))])
+    (check g1 > g2))
+
+  (let ([g1 (parse-grid '((.. .. .. .. .. .. .. ..)
+                          (.. .. .. .. .. .. .. ..)
+                          (.. .. .. .. .. .. .. ..)
+                          (.. .. .. .. .. .. .. ..)
+                          (.. .. .. .. .. .. .. ..)
+                          (.. .. .. .. .. .. .. ..)
+                          (.. .. .. .. .. .. .. ..)
+                          (.. .. .. .. .. .. .. ..)
+                          (.. .. .. .. .. .. .. ..)
+                          (.. .. .. .. .. .. .. ..)
+                          (r^ .. .. .. .. .. .. ..)
+                          (r_ .. .. .. .. .. .. ..)
+                          (<r y> .. .. .. .. .. ..)
+                          (<b y> .. .. <r b> .. ..)
+                          (<b y> .. .. r^ .. .. ..)
+                          (<b o> .. .. y_ .. .. ..)
+                          (.. r^ .. .. <y o> .. ..)
+                          (bb y_ .. <o y> .. .. ..)
+                          (BB yy .. rr .. .. .. ..)
+                          (RR yy .. rr .. .. .. ..)
+                          (BB rr .. rr .. .. .. ..)
+                          (-- -- -- -- -- -- -- --)))]
+        ; Regression - don't overvalue the rightmost "broken peak"
+        ; (especially because it overhangs nothing!)
+        [g2 (parse-grid '((.. .. .. .. .. .. .. ..)
+                          (.. .. .. .. .. .. .. ..)
+                          (.. .. .. .. .. .. .. ..)
+                          (.. .. .. .. .. .. .. ..)
+                          (.. .. .. .. .. .. .. ..)
+                          (.. .. .. .. .. .. .. ..)
+                          (.. .. .. .. .. .. .. ..)
+                          (.. .. .. .. .. .. .. ..)
+                          (.. .. .. .. .. .. .. ..)
+                          (.. .. .. .. .. .. .. ..)
+                          (r^ .. .. .. .. .. .. ..)
+                          (r_ .. .. .. .. .. .. ..)
+                          (<r y> .. .. b^ .. .. ..)
+                          (<b y> .. .. r_ .. .. ..)
+                          (<b y> .. .. r^ .. .. ..)
+                          (<b o> .. .. y_ .. .. ..)
+                          (.. r^ .. .. <y o> .. ..)
+                          (bb y_ .. <o y> .. .. ..)
+                          (BB yy .. rr .. .. .. ..)
+                          (RR yy .. rr .. .. .. ..)
+                          (BB rr .. rr .. .. .. ..)
+                          (-- -- -- -- -- -- -- --)))])
+    (check g1 > g2))
+
+  (let ([g1 (parse-grid '((.. .. .. .. .. .. .. ..)
+                          (.. .. .. .. .. .. .. ..)
+                          (.. .. .. .. .. .. .. ..)
+                          (.. .. .. .. <b r> .. ..)
+                          (.. b^ .. .. .. <r o> ..)
+                          (.. r_ .. b^ .. .. y^ ..)
+                          (.. <r b> y_ .. r^ y_ ..)
+                          (.. .. <r y> .. r_ <o b>)
+                          (YY .. <r o> BB RR YY ..)
+                          (.. .. .. yy RR BB YY BB)
+                          (BB rr RR YY .. YY .. ..)
+                          (BB RR RR BB BB RR BB ..)
+                          (.. BB BB YY YY RR BB RR)
+                          (RR RR .. .. BB YY YY RR)
+                          (RR RR YY RR .. YY RR YY)
+                          (BB .. RR .. BB RR BB BB)
+                          (BB .. RR RR YY RR BB BB)
+                          (RR BB YY BB YY BB YY RR)
+                          (RR YY .. YY RR YY .. ..)
+                          (YY BB RR .. YY RR RR YY)
+                          (YY .. BB BB RR BB .. BB)
+                          (-- -- -- -- -- -- -- --)))]
+        [g2 (parse-grid '((.. .. .. .. .. .. .. ..)
+                          (.. .. .. .. .. .. .. ..)
+                          (.. .. .. .. .. .. .. ..)
+                          (.. .. .. .. .. .. .. ..)
+                          (.. b^ .. .. .. <r o> ..)
+                          (.. r_ .. b^ .. .. y^ r^)
+                          (.. <r b> y_ .. r^ y_ b_)
+                          (.. .. <r y> .. r_ <o b>)
+                          (YY .. <r o> BB RR YY ..)
+                          (.. .. .. yy RR BB YY BB)
+                          (BB rr RR YY .. YY .. ..)
+                          (BB RR RR BB BB RR BB ..)
+                          (.. BB BB YY YY RR BB RR)
+                          (RR RR .. .. BB YY YY RR)
+                          (RR RR YY RR .. YY RR YY)
+                          (BB .. RR .. BB RR BB BB)
+                          (BB .. RR RR YY RR BB BB)
+                          (RR BB YY BB YY BB YY RR)
+                          (RR YY .. YY RR YY .. ..)
+                          (YY BB RR .. YY RR RR YY)
+                          (YY .. BB BB RR BB .. BB)
+                          (-- -- -- -- -- -- -- --)))])
+    (check g1 > g2))
+
+  (let ([g1 (parse-grid '((.. .. .. .. .. .. .. ..)
+                          (.. .. .. .. .. .. .. ..)
+                          (.. .. .. .. .. .. .. ..)
+                          (.. .. .. .. .. y^ .. ..)
+                          (.. <y o> .. .. y_ .. ..)
+                          (<r y> <b b> .. r^ .. ..)
+                          (r^ .. .. <o b> o_ .. ..)
+                          (b_ .. .. .. <b r> .. ..)
+                          (bb .. .. .. <b r> .. ..)
+                          (BB .. .. .. .. RR <y r>)
+                          (.. <y b> <y o> .. <y b>)
+                          (RR YY <b o> BB .. RR YY)
+                          (BB .. .. y^ RR YY BB RR)
+                          (.. .. .. y_ BB YY RR ..)
+                          (RR BB .. YY YY BB RR BB)
+                          (YY .. .. .. BB YY BB YY)
+                          (YY .. .. BB RR .. .. ..)
+                          (BB RR BB .. YY .. RR RR)
+                          (RR BB YY RR YY BB .. ..)
+                          (YY YY RR RR BB YY BB YY)
+                          (RR .. BB YY YY BB .. RR)
+                          (-- -- -- -- -- -- -- --)))]
+        [g2 (parse-grid '((.. .. .. .. .. .. .. ..)
+                          (.. .. .. .. .. .. .. ..)
+                          (.. .. .. .. .. .. .. ..)
+                          (y^ .. .. .. .. y^ .. ..)
+                          (r_ <y o> .. .. y_ .. ..)
+                          (<r y> <b b> .. r^ .. ..)
+                          (r^ .. .. <o b> o_ .. ..)
+                          (b_ .. .. .. <b r> .. ..)
+                          (bb .. .. .. <b r> .. ..)
+                          (BB .. .. .. .. RR .. ..)
+                          (.. <y b> <y o> .. <y b>)
+                          (RR YY <b o> BB .. RR YY)
+                          (BB .. .. y^ RR YY BB RR)
+                          (.. .. .. y_ BB YY RR ..)
+                          (RR BB .. YY YY BB RR BB)
+                          (YY .. .. .. BB YY BB YY)
+                          (YY .. .. BB RR .. .. ..)
+                          (BB RR BB .. YY .. RR RR)
+                          (RR BB YY RR YY BB .. ..)
+                          (YY YY RR RR BB YY BB YY)
+                          (RR .. BB YY YY BB .. RR)
+                          (-- -- -- -- -- -- -- --)))])
+    (check g1 > g2))
+
+  (let ([g1 (parse-grid '((.. .. .. .. .. .. .. ..)
+                          (.. .. .. .. .. .. .. ..)
+                          (.. .. .. .. .. .. .. ..)
+                          (.. .. .. .. .. .. .. ..)
+                          (.. .. .. .. .. .. .. ..)
+                          (.. .. .. .. .. .. .. ..)
+                          (.. .. .. .. .. .. .. ..)
+                          (.. .. .. .. .. .. .. ..)
+                          (.. y^ .. .. .. .. .. ..)
+                          (.. y_ .. .. .. .. .. ..)
+                          (.. y^ .. .. .. .. .. ..)
+                          (.. r_ .. .. .. .. .. ..)
+                          (.. r^ .. .. .. .. .. ..)
+                          (.. r_ .. .. .. .. .. ..)
+                          (<y y> .. .. .. .. .. ..)
+                          (.. y^ .. .. .. .. .. ..)
+                          (.. r_ <b r> .. .. .. ..)
+                          (yy b^ .. <r y> .. .. ..)
+                          (yy y_ .. rr .. .. .. ..)
+                          (YY y^ b^ bb .. .. .. ..)
+                          (BB y_ b_ bb .. .. oo ..)
+                          (-- -- -- -- -- -- -- --)))]
+        [g2 (parse-grid '((.. .. .. .. .. .. .. ..)
+                          (.. .. .. .. .. .. .. ..)
+                          (.. .. .. .. .. .. .. ..)
+                          (.. .. .. .. .. .. .. ..)
+                          (.. .. .. .. .. .. .. ..)
+                          (.. .. .. .. .. .. .. ..)
+                          (.. .. .. .. .. .. .. ..)
+                          (.. .. .. .. .. .. .. ..)
+                          (.. .. .. .. .. .. .. ..)
+                          (.. .. .. .. .. .. .. ..)
+                          (.. y^ .. .. .. .. .. ..)
+                          (.. r_ .. .. .. .. .. ..)
+                          (.. r^ .. .. .. .. .. ..)
+                          (.. r_ .. .. .. .. .. ..)
+                          (<y y> .. .. .. .. .. ..)
+                          (.. y^ .. .. y^ .. .. ..)
+                          (.. r_ <b r> y_ .. .. ..)
+                          (yy b^ .. <r y> .. .. ..)
+                          (yy y_ .. rr .. .. .. ..)
+                          (YY y^ b^ bb .. .. .. ..)
+                          (BB y_ b_ bb .. .. oo ..)
+                          (-- -- -- -- -- -- -- --)))])
+    (check g1 > g2))
+
+  (let ([g1 (parse-grid '((.. .. .. .. .. .. .. ..)
+                          (.. .. .. .. .. .. .. ..)
+                          (.. .. .. .. .. .. .. ..)
+                          (.. .. .. .. .. .. .. ..)
+                          (.. .. .. .. .. .. .. ..)
+                          (.. .. .. .. .. .. .. ..)
+                          (.. .. .. .. r^ .. .. ..)
+                          (.. .. .. .. r_ .. .. ..)
+                          (.. .. .. .. <o r> .. ..)
+                          (.. .. .. .. RR .. .. ..)
+                          (.. .. .. .. .. .. .. ..)
+                          (.. .. .. .. .. .. .. ..)
+                          (.. .. .. .. YY .. .. ..)
+                          (.. .. .. .. BB .. .. ..)
+                          (.. .. .. .. .. <r b> ..)
+                          (.. .. .. .. BB RR BB ..)
+                          (.. .. .. RR YY RR BB ..)
+                          (.. bb .. BB YY BB YY RR)
+                          (.. bb yy .. RR YY .. ..)
+                          (.. BB RR .. YY RR RR YY)
+                          (.. .. BB BB RR BB .. BB)
+                          (-- -- -- -- -- -- -- --)))]
+        ; TODO: broken peak is just silly right now
+        [g2 (parse-grid '((.. .. .. .. .. .. .. ..)
+                          (.. .. .. .. .. .. .. ..)
+                          (.. .. .. .. .. .. .. ..)
+                          (.. .. .. .. .. .. .. ..)
+                          (.. .. .. .. .. .. .. ..)
+                          (.. .. .. .. .. .. .. ..)
+                          (.. .. .. .. .. .. .. ..)
+                          (.. .. .. .. .. .. .. ..)
+                          (.. .. .. .. <o r> .. ..)
+                          (.. .. .. .. RR .. .. ..)
+                          (.. .. .. .. .. .. .. ..)
+                          (.. .. .. .. .. .. .. ..)
+                          (.. .. .. .. YY .. .. ..)
+                          (.. .. .. .. BB .. .. ..)
+                          (.. .. .. r^ .. <r b> ..)
+                          (.. .. .. r_ BB RR BB ..)
+                          (.. .. .. RR YY RR BB ..)
+                          (.. bb .. BB YY BB YY RR)
+                          (.. bb yy .. RR YY .. ..)
+                          (.. BB RR .. YY RR RR YY)
+                          (.. .. BB BB RR BB .. BB)
+                          (-- -- -- -- -- -- -- --)))])
+    (check g1 > g2))
+  ) ; end test submodule
