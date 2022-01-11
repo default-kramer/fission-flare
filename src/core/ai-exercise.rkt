@@ -215,7 +215,7 @@
             (misc:random-seed . ,seed))))
 
   (run-trials 1000 mini-layout-settings 10913)
-  (run-trials 500 standard-layout-settings 25910)
+  (run-trials 500 standard-layout-settings 27979)
 
   ; Clean up all the places
   (for ([worker all-workers])
