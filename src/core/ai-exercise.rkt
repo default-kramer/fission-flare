@@ -214,8 +214,8 @@
             (misc:combos-require-fuel? . #f)
             (misc:random-seed . ,seed))))
 
-  (run-trials 1000 mini-layout-settings 10913)
-  (run-trials 500 standard-layout-settings 27979)
+  (run-trials 1000 mini-layout-settings 11209)
+  (run-trials 500 standard-layout-settings 27921)
 
   ; Clean up all the places
   (for ([worker all-workers])

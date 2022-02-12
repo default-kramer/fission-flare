@@ -232,10 +232,12 @@
   (or (mod! 'build)
       (fail "grid-after-destroy failed")))
 
+(define-type Mode (U 'vertical 'horizontal 'both))
+
 ; Finds rows and columns of adjacent occupants sharing the same color.
 ; A group-count of 4 means the group must contain 4 or more occupants.
-(: find-destruction-groups (-> Grid Integer (Listof DestructionGroup)))
-(define (find-destruction-groups grid group-count)
+(: find-destruction-groups (-> Grid Integer Mode (Listof DestructionGroup)))
+(define (find-destruction-groups grid group-count mode)
   (define width (grid-width grid))
   (define height (grid-height grid))
 
@@ -304,16 +306,17 @@
       ; We've reached the end of the row or column:
       (finish-group!)))
 
-  ; Search for rows, then for columns
-  (find-groups! width height make-loc)
-  (find-groups! height width (lambda (i j) (make-loc j i)))
+  (when (member mode '(vertical both))
+    (find-groups! width height make-loc))
+  (when (member mode '(horizontal both))
+    (find-groups! height width (lambda (i j) (make-loc j i))))
   groups)
 
-(: grid-destroy (->* (Grid) (Integer) (values (U #f Grid)
-                                              (Listof DestructionGroup))))
-(define (grid-destroy grid [group-count 4])
+(: grid-destroy (->* (Grid) (Integer #:mode Mode)
+                     (values (U #f Grid) (Listof DestructionGroup))))
+(define (grid-destroy grid [group-count 4] #:mode [mode 'both])
   (define groups : (Listof DestructionGroup)
-    (find-destruction-groups grid group-count))
+    (find-destruction-groups grid group-count mode))
   (if (empty? groups)
       (values #f groups)
       (let ([mod! (grid-modifier grid)])

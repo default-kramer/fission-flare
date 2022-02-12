@@ -282,6 +282,15 @@
 
 ; Enough explanation, let's get to implementation!
 
+; This parameter enables tuning for the different game modes
+(define optimize-for : (Parameterof (U #f 'mini 'standard 'wave))
+  (make-parameter #f))
+
+(: param-is (All (A) (-> (Parameterof A) A * Boolean)))
+; more type-safe way to test a parameter value
+(define (param-is p . vals)
+  (and (member (p) vals) #t))
+
 ; To analyze a WxH grid, we will create some WxH matrixes to store various
 ; calculations about each cell.
 (define-type (Matrixof A) (Vectorof (Vectorof A)))
@@ -320,6 +329,14 @@
   (fx+ 1 (fx- (loc-y (pillar-hi p))
               (loc-y (pillar-lo p)))))
 
+(: pillar-locs (-> Pillar (Listof Loc)))
+(define (pillar-locs p)
+  (let* ([lo (pillar-lo p)]
+         [hi (pillar-hi p)]
+         [x (loc-x lo)])
+    (for/list ([y (in-range (loc-y lo) (fx+ 1 (loc-y hi)))])
+      (make-loc x y))))
+
 ; The dependency [B3 A3] (or "B3 depends on A3") would be stored in this hash
 ; with a Key of B3 and a Value of A3.
 (define-type Deps (Immutable-HashTable Loc Loc))
@@ -338,6 +355,7 @@
 (struct analysis ([grid : Grid]
                   [column-stats : (Vectorof ColumnStats)]
                   [pillars : (Matrixof (U #f Pillar))]
+                  [pillar-list : (Listof Pillar)]
                   [dependencies : Deps]
                   [blockages : Blockages])
   #:type-name Analysis
@@ -354,6 +372,12 @@
          [peak (column-stats-peak stats)]
          [pillar (analysis-pillar analysis peak)]
          #:break (when (not pillar) 0)
+         ; We are considering the shattered grid, so don't check stability
+         ; ... Is what I *would* think, but for some reason standard layout
+         ; still benefits from this check. Not sure why.
+         #:break (when (and (param-is optimize-for 'standard)
+                            (not (pillar-stable? pillar)))
+                   0)
          ; assuming group of 4 will destroy:
          [needed (fx- 4 (pillar-length pillar))]
          [height (grid-height (analysis-grid analysis))]
@@ -365,16 +389,19 @@
     (if (room . fx< . 1)
         -1001001
         (case room
-          [(1 2 3) -10000]
-          [(4 5 6 7) -5000]
+          [(1) -3000]
+          [(2) -2000]
+          [(3) -1000]
           [else 0]))))
 
 (: find-pillars (-> Grid (List (Matrixof (U #f Pillar))
-                               (Vectorof ColumnStats))))
+                               (Vectorof ColumnStats)
+                               (Listof Pillar))))
 (define (find-pillars [grid : Grid])
   (define w (grid-width grid))
   (define h (grid-height grid))
   (define matrix (make-matrix w h (ann #f (U #f Pillar))))
+  (define all-pillars : (Listof Pillar) '())
   (define stats : (Listof ColumnStats) '())
 
   (: pillar-end (-> Integer Integer Color Loc))
@@ -424,12 +451,15 @@
                               (ground? occ)
                               (and (not (can-burst? occ))
                                    (is-stable? x (sub1 y))))])
-            (set! current-pillar (pillar start end color stable?))
+            (let ([p (pillar start end color stable?)])
+              (set! current-pillar p)
+              (set! all-pillars (cons p all-pillars)))
             (matrix-set! matrix loc current-pillar)))))
     (set! stats (cons (column-stats (cdr color-mismatch-counter) peak)
                       stats)))
   (list matrix
-        (list->vector (reverse stats))))
+        (list->vector (reverse stats))
+        all-pillars))
 
 (: find-deps (-> Grid (-> Loc Boolean) Deps))
 (define (find-deps grid stable?)
@@ -501,7 +531,7 @@
       (and pillar (pillar-stable? pillar))))
   (define deps (find-deps grid stable?))
   (define blockages (find-blockages grid pillars deps))
-  (analysis grid (second result) pillars deps blockages))
+  (analysis grid (second result) pillars (third result) deps blockages))
 
 
 ; These "check-" functions are just to help the test submodule.
@@ -594,41 +624,107 @@
     (parse-state 'pattern 'queue)))
 
 
-(: grid-resolve (-> Grid (Listof DestructionGroup)
-                    (Values Grid (Listof DestructionGroup))))
+(: grid-resolve (->* (Grid (Listof DestructionGroup))
+                     ((U 'vertical 'horizontal 'both))
+                     (Values Grid (Listof DestructionGroup))))
 ; Fast-forward the "Fall -> Destroy -> Fall -> Destroy ..." cycle.
 ; Return resulting grid and all destruction groups.
-(define (grid-resolve grid accum)
+(define (grid-resolve grid accum [mode 'both])
   (let* ([g2 (grid-fall grid)]
          #:break (when g2
-                   (grid-resolve g2 accum))
+                   (grid-resolve g2 accum mode))
          [(g2 groups)
-          (grid-destroy grid)])
+          (grid-destroy grid #:mode mode)])
     (if g2
-        (grid-resolve g2 (append groups accum))
+        (grid-resolve g2 (append groups accum) mode)
         (values grid accum))))
 
-(define-type Run (Listof (Pairof Loc Occupant)))
+(: grid-shatter (-> (U Analysis Grid)
+                    (Listof DestructionGroup)
+                    (Values Grid Analysis (Listof DestructionGroup))))
+; For each pillar that is a stable peak, separate all joined catalysts
+; and run the fall+destroy cycle to completion.
+; Repeat this entire process by recursion until nothing changes.
+; Doing this may "shake loose" some unstable pillars causing them to fall
+; and become stable or even become destroyed.
+; The resulting grid is a prediction only; it is not an inevitable outcome.
+; Even so, it seems to be a good-enough heuristic.
+(define (grid-shatter x groups)
 
-(: run-color (-> Run Color))
-(define (run-color run)
-  (or (occupant-color (cdr (car run)))
-      (fail "illegal run was constructed - lacks color")))
+  (: change-color (-> Occupant Occupant))
+  ; After a pillar is shattered, we change its color to reflect the idea
+  ; that it wouldn't even be on the grid if it was truly destroyed.
+  ; (If we didn't do this, these "ghost pillars" might color-match with
+  ;  real occupants and cause implausible destructions.)
+  ; Perhaps a better alternative would be to simply destroy the pillar
+  ; that is being shattered, but we would need to update other code to
+  ; avoid rewarding this un-earned destruction.
+  (define (change-color occ)
+    (define (get-color)
+      (case (occupant-color occ)
+        [(r r2) 'r2]
+        [(y y2) 'y2]
+        [(b b2) 'b2]
+        [else (fail "unexpected color" occ)]))
+    (cond
+      [(catalyst? occ)
+       (struct-copy catalyst occ [direction #f] [color (get-color)])]
+      [(fuel? occ)
+       (struct-copy fuel occ [color (get-color)])]
+      [(ground? occ)
+       occ]
+      [else
+       (fail "unexpected occupant in pillar" occ)]))
 
-(: has-fuel? (-> Run Boolean))
-(define (has-fuel? run)
-  (match run
-    [(list) #f]
-    [(list (cons loc occ) more ...)
-     (or (fuel? occ)
-         (has-fuel? more))]))
+  (let* ([a : Analysis (if (grid? x)
+                           (grid-analysis x)
+                           x)]
+         [grid : Grid (analysis-grid a)]
+         [stats (analysis-column-stats a)]
+         [mod! (grid-modifier grid)]
+         [done : (Listof Loc) '()]
+         [found? : Boolean #f])
+    (for ([x (in-range (grid-width grid))])
+      (let* ([stats (vector-ref stats x)]
+             [peak (column-stats-peak stats)]
+             [pillar (analysis-pillar a peak)]
+             #:break (when (not pillar) #f)
+             ; Only shatter stable pillars
+             #:break (when (not (pillar-stable? pillar)) #f))
+        (for ([loc (pillar-locs pillar)])
+          (set! done (cons loc done))
+          (let* ([occ (or (grid-get grid loc)
+                          (fail "pillar has empty loc" loc pillar))]
+                 [_ (mod! 'remove loc)]
+                 [_ (mod! 'set loc (change-color occ))]
+                 #:break (when (not (catalyst? occ)) #f)
+                 [dir (catalyst-direction occ)]
+                 #:break (when (not (member dir '(l r)))
+                           #f)
+                 [loc2 (loc-neighbor loc dir)]
+                 #:break (when (member loc2 done) #f)
+                 [occ2 (grid-get grid loc2)]
+                 #:break (when (not (catalyst? occ2))
+                           (fail "invalid catalyst pair" loc occ grid))
+                 [occ (struct-copy catalyst occ [direction #f])]
+                 [occ2 (struct-copy catalyst occ2 [direction #f])])
+            (set! found? #t)
+            (mod! 'remove loc2)
+            (mod! 'set loc2 occ2)))))
+    (if found?
+        (let* ([grid (or (mod! 'build)
+                         (fail "shatter failed"))]
+               [(grid groups)
+                ; Including horizontal groups can cause bad moves.
+                ; If you are curious, there is at least one instructive test
+                ; that will fail if you change this.
+                (grid-resolve grid groups 'vertical)])
+          (grid-shatter grid groups))
+        (values grid a groups))))
 
-(: problematic? (-> Run Grid Boolean))
+(: problematic? (-> Pillar Grid Boolean))
 ; A run is problematic if it blocks vertical access to fuel.
-(define (problematic? run grid)
-
-  (define (get-y [x : (Pairof Loc Occupant)])
-    (loc-y (car x)))
+(define (problematic? p grid)
 
   (: fuel-below? (-> Integer Integer Boolean))
   ; TODO could use some caching/dynamic programming here...
@@ -648,17 +744,37 @@
                      [(r) (key-point? (add1 x) (sub1 y))]
                      [else #f]))))))
 
-  (or (has-fuel? run)
-      (let* ([ys (map get-y run)]
-             [y (sub1 (apply min ys))]
-             [x (loc-x (car (car run)))]
-             ; This `tall?` was introduced to stop the AI from building towers.
-             ; I would think that other measurements (like danger) would make
-             ; this obsolete, but mini layouts (and maybe standard) perform
-             ; better with this check intact:
-             [tall?
-              ((apply max ys) . > . (/ (grid-height grid) 2))])
-        (or tall? (fuel-below? x y)))))
+  (let* ([hi (pillar-hi p)]
+         [y (loc-y hi)]
+         [x (loc-x hi)])
+    (fuel-below? x y)))
+
+(module+ test
+  (let ([a (grid-analyze
+            [17 .. .. .. .. .. ..]
+            [16 .. .. .. .. .. ..]
+            [15 .. .. .. .. .. ..]
+            [14 .. .. .. .. .. ..]
+            [13 .. .. .. .. .. ..]
+            [12 .. .. .. .. .. ..]
+            [11 .. yy .. .. .. ..]
+            [10 .. rr .. .. .. ..]
+            [-9 .. rr .. .. .. ..]
+            [-8 .. rr .. .. .. ..]
+            [-7 <y y> .. .. .. ..]
+            [-6 .. y^ .. .. .. ..]
+            [-5 .. r_ <b r> .. ..]
+            [-4 yy b^ .. <r y> ..]
+            [-3 yy y_ .. rr .. ..]
+            [-2 YY y^ b^ bb .. ..]
+            [-1 BB y_ b_ bb .. ..]
+            [-- A: B: C: D: E: F:])])
+    (let ([p1 (or (analysis-pillar a B11)
+                  (fail "expected pillar"))]
+          [p2 (or (analysis-pillar a E4)
+                  (fail "expected pillar"))])
+      (check #:true (problematic? p1 (analysis-grid a)))
+      (check #:true (not (problematic? p2 (analysis-grid a)))))))
 
 (: fxsum (-> (Listof Fixnum) Fixnum))
 (define (fxsum nums)
@@ -666,151 +782,30 @@
             ([num nums])
     (fx+ sum num)))
 
-(struct info ([occ : Occupant]
-              [vertical-run : (Boxof Run)]
-              ; A broken run is a run that "sees through" blank catatlysts and empty space.
-              ; TODO have to solve the fuel blockage problem though!
-              [vertical-broken-run : (Boxof Run)])
-  #:transparent)
-
-(: analyze (-> Grid (List (Vectorof (Vectorof (U #f info)))
-                          (Listof Run) ; vertical-runs
-                          (Listof Run) ; vertical-broken-runs
-                          )))
-(define (analyze [grid : Grid])
-  (define width (grid-width grid))
-  (define height (grid-height grid))
-
-  (define vertical-runs : (Listof Run) '())
-  (define vertical-broken-runs : (Listof Run) '())
-
-  (define-type Column (Vectorof (U #f info)))
-  (define (empty-column)
-    (ann (make-vector height #f) Column))
-
-  (define columns : (Vectorof Column)
-    (make-vector width (empty-column)))
-
-  (for ([x (in-range (grid-width grid))])
-    (let ([column : Column (empty-column)]
-          [run-box : (U #f (Boxof Run)) #f]
-          [broken-run-box : (U #f (Boxof Run)) #f]
-          [run-broken? : Boolean #f])
-      (vector-set! columns x column)
-
-      ; Determines if the current runs (broken and non-broken) are finished,
-      ; and cleans them up. Does not start a new run.
-      (define (maybe-finish-runs! [occ : (U #f Occupant)] [done-with-column? : Boolean])
-        (let ([color (and occ (occupant-color occ))])
-          (let ([rb run-box])
-            (when (and rb
-                       (not (equal? color (run-color (unbox rb)))))
-              (set! vertical-runs (cons (unbox rb) vertical-runs))
-              (set! run-box #f)))
-          (let* ([brb broken-run-box]
-                 #:break (when (not brb) #f)
-                 [run (unbox brb)])
-            (when (not color)
-              (set! run-broken? #t))
-            (when (or done-with-column?
-                      ; Mismatched color always ends the run:
-                      (and color (not (equal? color (run-color run))))
-                      ; Fuel ends the run if we have seen a gap:
-                      (and run-broken? (fuel? occ)))
-              (set! vertical-broken-runs (cons run vertical-broken-runs))
-              (set! broken-run-box #f)
-              (set! run-broken? #f)))))
-
-      (for ([y (in-range (grid-height grid))])
-        (let* ([loc (make-loc x y)]
-               [occ (grid-get grid loc)]
-               [color (and occ (occupant-color occ))])
-          (maybe-finish-runs! occ #f)
-          (when (and occ color)
-            (let* ([rb : (Boxof Run)
-                       (or run-box (box (list)))]
-                   [brb : (Boxof Run)
-                        (or broken-run-box (box (list)))]
-                   [run-item (cons loc occ)])
-              (: update-box! (-> (Boxof Run) Any))
-              (define (update-box! b)
-                (let ([run (unbox b)])
-                  (cond
-                    [(empty? run)
-                     (set-box! b (list run-item))]
-                    [(equal? color (run-color run))
-                     (set-box! b (cons run-item run))]
-                    [else
-                     ; If this occupant doesn't match the previous, we should have
-                     ; already started a new run
-                     (fail "likely bug in maybe-finish-run!" run-item run)])))
-              (set! run-box rb)
-              (set! broken-run-box brb)
-              (update-box! rb)
-              (update-box! brb)
-
-              (let ([info (info occ rb brb)])
-                (vector-set! column y info))))))
-
-      ; end of column, finish run
-      (maybe-finish-runs! #f #t)))
-
-  ; Return value:
-  (list columns vertical-runs vertical-broken-runs))
-
-(: peak-broken? (-> Grid Integer (Vectorof (U #f info)) Boolean))
-(define (peak-broken? grid x column)
-  (let loop ([y (sub1 (vector-length column))])
-    (let* (#:break (when (y . < . 0)
-                     #f)
-           [blank? (let ([occ (grid-get grid (make-loc x y))])
-                     (and (catalyst? occ)
-                          (not (catalyst-color occ))))]
-           #:break (when blank? #t)
-           [info (vector-ref column y)]
-           #:break (when (not info)
-                     (loop (sub1 y)))
-           [occ (info-occ info)]
-           [vr (unbox (info-vertical-run info))]
-           [vbr (unbox (info-vertical-broken-run info))])
-      (cond
-        ; TODO blank catatlysts are not recorded in the column. That is why
-        ; we need the grid and the x-coordinate.
-        ; Being able to uncomment this would feel nicer:
-        #;[(and (catalyst? occ)
-                (not (catalyst-color occ)))
-           #t]
-        ; TODO I think this has become "column-has-blank?" now?
-        ; Uncommenting this causes silly play:
-        #;[(and ((length vr) . < . 4)
-                ((length vbr) . > . (length vr)))
-           #t]
-        [else #f]))))
-
 (: color-mismatch-penalty (-> Fixnum Fixnum))
 (define (color-mismatch-penalty [mismatch-count : Fixnum])
   (case mismatch-count
-    ((0) 0)
-    ((1) -100)
-    ((2) -300)
-    ((3) -600)
-    ((4) -1000)
-    ((5) -1500)
-    ((6) -2100)
-    ((7) -2800)
-    ((8) -3600)
-    ((9) -4500)
-    ((10) -5500)
-    ((11) -6600)
-    ((12) -7800)
-    ((13) -9100)
-    ((14) -10500)
-    ((15) -12000)
-    ((16) -13600)
-    ((17) -15300)
-    ((18) -17100)
-    ((19) -19000)
-    ((20) -21000)
+    ((0 1) 0)
+    ((2) -1000)
+    ((3) -3000)
+    ((4) -6000)
+    ((5) -10000)
+    ((6) -15000)
+    ((7) -21000)
+    ((8) -28000)
+    ((9) -36000)
+    ((10) -45000)
+    ((11) -55000)
+    ((12) -66000)
+    ((13) -78000)
+    ((14) -91000)
+    ((15) -105000)
+    ((16) -120000)
+    ((17) -136000)
+    ((18) -153000)
+    ((19) -171000)
+    ((20) -190000)
+    ((21) -210000)
     [else (fail "unexpected mismatch-count" mismatch-count)]))
 
 (define explain-score? : (Parameterof Boolean) (make-parameter #f))
@@ -822,112 +817,139 @@
                 [(state? x) (state-grid x)]
                 [else (state-grid (car x))])))
 
+(: score-pillars (-> Analysis Fixnum))
+(define (score-pillars a)
+  (let ([pillars (analysis-pillar-list a)])
+    (fxsum
+     (for/list ([p pillars])
+       (if (problematic? p (analysis-grid a))
+           (begin
+             (case (pillar-length p)
+               ; Ending these with a 1 means the last 2 digits of the sum
+               ; should usually be the count of problematic pillars
+               [(1) -6001] ; 1 -> 2 improves by 2000
+               [(2) -4001] ; 2 -> 3 improves by 3000
+               [(3) -1001] ; 3 -> 4 improves by 1000
+               [else (fail "undestroyed group" p)]))
+           (case (pillar-length p)
+             [(1) -600]
+             [(2) -400]
+             [(3) -100]
+             [else (fail "undestroyed group" p)]))))))
+
+(: favor-higher-pillars (-> Analysis Fixnum))
+(define (favor-higher-pillars a)
+  (let ([grid (analysis-grid a)]
+        [pillars (analysis-pillar-list a)])
+    (fxsum
+     (for/list ([p pillars])
+       (let* ([y (loc-y (pillar-lo p))])
+         (fx* y (case (pillar-length p)
+                  [(1) -3]
+                  [(2) -2]
+                  [(3) -1]
+                  [else 0])))))))
+
+(: score-blanks (-> Grid Fixnum))
+(define (score-blanks grid)
+  (define (check-bonus [loc : Loc] [dir : Direction])
+    (let* ([loc2 (loc-neighbor loc dir)]
+           [loc3 (loc-neighbor loc2 'd)])
+      (ann (if (not (grid-get grid loc3))
+               10
+               1) Fixnum)))
+  (let* ([sum : Fixnum 0])
+    (for ([x (in-range (grid-width grid))])
+      (for ([y (in-range (grid-height grid))])
+        (let* ([loc (make-loc x y)]
+               [occ (grid-get grid loc)]
+               #:break (when (not (catalyst? occ)) #f)
+               #:break (when (catalyst-color occ) #f)
+               [dir (catalyst-direction occ)]
+               [adder : Fixnum (case dir
+                                 [(#f u d) 1]
+                                 [(l r) (check-bonus loc dir)])])
+          (set! sum (fx+ adder sum)))))
+    sum))
+
 (: grid-score (-> Grid Fixnum))
-(define (grid-score grid)
-  (let* ([width (grid-width grid)]
-         [(grid-a _)
-          (grid-resolve grid '())]
-         [analysis-a (grid-analysis grid-a)]
-         [column-stats-a (analysis-column-stats analysis-a)]
-         [res-a (analyze grid-a)]
-         [cols-a (first res-a)]
-         [runs-a (second res-a)]
-         [broken-runs-a (third res-a)]
-         [grid-b (or (grid-burst grid) grid)]
-         [(grid-b _)
+(define (grid-score grid-a)
+  (let* ([width (grid-width grid-a)]
+         [height (grid-height grid-a)]
+         [blank-score (score-blanks grid-a)]
+         [bursted? (grid-burst grid-a)]
+         [(grid-a-resolved groups-a)
+          (grid-resolve grid-a '())]
+         [grid-b (or bursted? grid-a)]
+         [(grid-b groups-b)
           (grid-resolve grid-b '())]
-         [res-b (analyze grid-b)]
-         [cols-b (first res-b)]
-         [runs-b (second res-b)]
-         [broken-runs-b (third res-b)]
          [analysis-b (grid-analysis grid-b)]
          [column-stats-b (analysis-column-stats analysis-b)]
-         ; Even though we have danger, this breathing room helps mini layouts
-         ; a little and standard layouts a lot (>700 energy).
-         [breathing-room-score
-          (fxsum
-           (for/list ([x (in-range width)])
-             (let* ([stats (vector-ref column-stats-a x)]
-                    [y (loc-y (column-stats-peak stats))]
-                    [y (- (grid-height grid) y)])
-               (case y
-                 [(0) (fail "impossible:" y)]
-                 [(1) 0]
-                 [(2) 1000]
-                 [(3) 3000]
-                 [(4) 6000]
-                 [else 10000]))))]
-         [burst-score
-          (fxsum
-           (for/list ([loc (grid-locs grid)])
-             (let* ([col-a (vector-ref cols-a (loc-x loc))]
-                    [info-a (vector-ref col-a (loc-y loc))]
-                    [occ-a : (U #f Occupant)
-                           (and info-a (info-occ info-a))]
-                    [col-b (vector-ref cols-b (loc-x loc))]
-                    [info-b (vector-ref col-b (loc-y loc))]
-                    [occ-b : (U #f Occupant)
-                           (and info-b (info-occ info-b))])
-               (cond
-                 [(and (fuel? occ-a)
-                       (not (fuel? occ-b)))
-                  100]
-                 [(and (fuel? occ-a)
-                       (fuel? occ-b))
-                  (let* ([count-a (length (unbox (info-vertical-run (or info-a (fail "TODO")))))]
-                         [count-b (length (unbox (info-vertical-run (or info-b (fail "TODO")))))]
-                         [diff (- count-b count-a)])
-                    (case count-b
-                      [(1) 0]
-                      [(2) (fx* 10 diff)]
-                      [(3) (fx* 20 diff)]
-                      [else (fail "impossible, right?")]))]
-                 [else 0]))))]
-         [problem-score
-          (fxsum
-           (for/list ([run : Run broken-runs-b])
-             (if (problematic? run grid-b)
-                 (case (length run)
-                   [(1) -60000]
-                   [(2) -50000]
-                   [(3) -30000]
-                   [else 0])
-                 (case (length run)
-                   [(1) -6000]
-                   [(2) -5000]
-                   [(3) -3000]
-                   [else 0]))))]
-         [danger-score
-          (fxsum (for/list ([x (in-range width)])
-                   (column-danger analysis-b x)))]
-         [broken-peak-score
-          (fxsum
-           (for/list ([x (in-range width)])
-             (let ([col (vector-ref cols-a x)])
-               (if (peak-broken? grid-a x col) 50 0))))]
+         [blockage-score
+          (fx* -2002002 (hash-count (analysis-blockages analysis-b)))]
+         [(grid-c analysis-c groups-c)
+          (grid-shatter analysis-b '())]
+         [pillar-score (score-pillars analysis-c)]
+         [pillar-height-score (favor-higher-pillars analysis-c)]
+         [groups-b-score
+          (fx* (if bursted? 5001 101)
+               (fx- (length groups-b) (length groups-a)))]
+         [groups-c-score
+          (fx* 101 (cast (length groups-c) Fixnum))]
          [mismatch-score
           (fxsum
            (for/list ([x (in-range width)])
              (let* ([stats (vector-ref column-stats-b x)]
                     [count (column-stats-color-mismatch-count stats)])
                (color-mismatch-penalty count))))]
-         [analysis-b (grid-analysis grid-b)]
-         [blockage-score
-          (fx* -100000 (hash-count (analysis-blockages analysis-b)))]
-         [score (fxsum (list burst-score
-                             mismatch-score breathing-room-score
-                             problem-score danger-score
-                             blockage-score broken-peak-score))])
-    (when (explain-score?)
-      (println (list "burst:" burst-score
-                     "mismatch:" mismatch-score
-                     "breathing room:" breathing-room-score
-                     "problem:" problem-score
-                     "danger:" danger-score
-                     "blockage:" blockage-score
-                     "broken peak:" broken-peak-score
-                     "total:" score)))
-    score))
+         [danger-score
+          (let ([a (if (param-is optimize-for 'standard)
+                       analysis-b
+                       analysis-c)])
+            (fxsum (for/list ([x (in-range width)])
+                     (column-danger a x))))]
+         ; == Notes on breathing-room-score ==
+         ; Data collected 2022-02-12
+         ; Using grid-a-resolved
+         ; * mini is 11209 (best so far)
+         ; * standard got much worse (vs disabled)
+         ; Using column-stats-b
+         ; * mini drops from 11209 to 11147 (vs grid-a-resolved)
+         ; * standard improves by only 1 point (vs disabled)
+         ; When disabled
+         ; * mini drops from 11209 to 11145 (vs grid-a-resolved)
+         ; * standard is 27921 (best so far)
+         [breathing-room-score
+          (if (param-is optimize-for 'mini)
+              (let* ([analysis (grid-analysis grid-a-resolved)]
+                     [column-stats (analysis-column-stats analysis)])
+                (fxsum
+                 (for/list ([x (in-range width)])
+                   (let* ([stats (vector-ref column-stats x)]
+                          [y (loc-y (column-stats-peak stats))]
+                          [y (- height y)])
+                     (case y
+                       [(0) (fail "impossible:" y)]
+                       [(1) 0]
+                       [(2) 1000]
+                       [(3) 3000]
+                       [(4) 6000]
+                       [else 10000])))))
+              0)])
+    (define-syntax-rule (do-total id ...)
+      (let ([total (fxsum (list id ...))])
+        (when (explain-score?)
+          (pretty-print (list (cons 'id id) ...)))
+        total))
+    (do-total pillar-score
+              pillar-height-score
+              blank-score
+              groups-b-score
+              groups-c-score
+              breathing-room-score
+              mismatch-score
+              danger-score
+              blockage-score)))
 
 (define-type MoveSeq (Listof Action))
 
@@ -991,58 +1013,6 @@
           (list))))
   go)
 
-(: plummet-or-burst (-> Possibility (Listof Possibility)))
-; Some hard-coded decisions of when to burst
-(define (plummet-or-burst poss)
-  (let* ([plummet-p (try poss (plummet))]
-         #:break (when (not plummet-p)
-                   ; if plummet fails, then burst will fail also
-                   (list))
-         [burst-p (try poss (list (plummet) (burst)))]
-         #:break (when (not burst-p)
-                   ; burst unavailable, just plummet
-                   (list plummet-p))
-         [(burst-grid burst-groups)
-          (grid-resolve (state-grid (car burst-p)) '())]
-         [burst-count (length burst-groups)]
-         #:break (when ((length burst-groups) . > . 3)
-                   ; For now, just always burst when we get >3 groups
-                   (list burst-p))
-         [(plummet-grid plummet-groups)
-          (grid-resolve (state-grid (car plummet-p)) '())]
-         [plummet-count (length plummet-groups)]
-         #:break (when (and (plummet-count . > . 0)
-                            (burst-count . > . plummet-count))
-                   ; Not sure about this, but seems to make sense
-                   (list burst-p))
-         #:break (when (= 0 (grid-count burst-grid fuel?))
-                   ; All fuel cleared
-                   (list burst-p)))
-    (list plummet-p burst-p)))
-
-(: get-possibilities (-> State (Listof Possibility)))
-(define (get-possibilities state)
-  (let* ([all (get-rotations state)]
-         [all (let* ([left (flatmap (foo (move 'l) #t) all)]
-                     [right (flatmap (foo (move 'r) #t) all)])
-                (append all left right))]
-         [all (flatmap plummet-or-burst all)])
-    all))
-
-(: choose-move (-> State (U #f Possibility)))
-; Chooses the AI's favorite move and returns the resulting state
-; plus the list of actions needed to reach that state.
-(define (choose-move state)
-  (define (score [p : Possibility])
-    (grid-score (state-grid (car p))))
-  (let* ([possibilities (get-possibilities state)]
-         [result (and (pair? possibilities)
-                      (argmax score possibilities))])
-    #;(when result
-        (pretty-print (print-grid (state-grid state)))
-        (pretty-print (print-grid (state-grid (car result)))))
-    result))
-
 (: catalyst-positions (-> State (Listof Possibility)))
 ; Returns all possible positions for the catalyst, but do not decide yet
 ; whether we will plummet or burst.
@@ -1084,6 +1054,13 @@
 
 (: get-plan (-> State (U #f Possibility)))
 (define (get-plan state)
+  (let* ([settings (state-settings state)]
+         [mode (game-settings-layout:mode settings)])
+    (parameterize ([optimize-for mode])
+      (get-plan2 state))))
+
+(: get-plan2 (-> State (U #f Possibility)))
+(define (get-plan2 state)
   ; Naming convention for this function:
   ;  p means "ply 1 plummet"
   ;  b means "ply 1 burst"
@@ -1132,29 +1109,51 @@
             (choice-possi p)))))
 
 (module+ test
-  ; fast-forward until the state accepts input
-  (: accept-input (-> State State))
-  (define (accept-input state)
-    (if (state-mover state)
-        state
-        (let* ([result (state-apply state (list (tick)))]
-               [state (or (car result)
-                          (fail "tick failed"))])
-          (accept-input state))))
-
-  (: make-moves (-> State (U Zero Positive-Byte) State))
-  (define (make-moves state count)
-    (if (= 0 count)
-        state
-        (let* ([state (accept-input state)]
-               [choice (or (choose-move state)
-                           (fail "could not choose move"))]
-               [seq (cadr choice)]
-               [result (state-apply state seq)]
-               [new-state (car result)])
-          (if new-state
-              (make-moves new-state (sub1 count))
-              (fail "failed to apply plan")))))
+  (let ([g1 (parse-grid '([.. .. .. ..]
+                          [.. .. .. ..]
+                          [.. .. .. ..]
+                          [.. .. .. ..]
+                          [.. .. .. ..]
+                          [.. .. .. ..]
+                          [.. .. .. ..]
+                          [.. .. .. ..]
+                          [.. .. .. ..]
+                          [.. .. .. ..]
+                          [<y y> .. ..]
+                          [YY YY .. YY]
+                          [.. .. .. YY]
+                          [.. .. .. YY]))]
+        [g2 (parse-grid '([.. .. .. ..]
+                          [.. .. .. ..]
+                          [.. .. .. ..]
+                          [.. .. .. ..]
+                          [.. .. .. ..]
+                          [.. .. .. ..]
+                          [.. .. .. ..]
+                          [.. .. .. ..]
+                          [.. .. .. ..]
+                          [.. y^ .. ..]
+                          [.. y_ .. ..]
+                          [YY YY .. YY]
+                          [.. .. .. YY]
+                          [.. .. .. YY]))]
+        ; This group of 5 wastes 1 catalyst:
+        [g3 (parse-grid '([.. .. .. ..]
+                          [.. .. .. ..]
+                          [.. .. .. ..]
+                          [.. .. .. ..]
+                          [.. .. .. ..]
+                          [.. .. .. ..]
+                          [.. .. .. ..]
+                          [.. .. .. ..]
+                          [.. .. .. ..]
+                          [.. .. .. y^]
+                          [.. .. .. y_]
+                          [YY YY .. YY]
+                          [.. .. .. YY]
+                          [.. .. .. YY]))])
+    (check g1 > g3)
+    (check g2 > g3))
 
   (let* ([g1 (parse-grid '((.. .. .. .. .. .. .. ..)
                            (.. .. .. .. .. .. .. ..)
@@ -1254,39 +1253,38 @@
                           (-- -- -- -- -- -- -- --)))])
     (check g1 > g2))
 
-  ; TODO is this a good test?
-  #;(let* ([g1 (parse-grid '((.. .. .. .. .. .. .. ..)
-                             (.. .. .. .. .. .. .. ..)
-                             (.. .. .. .. .. .. .. ..)
-                             (.. .. .. .. .. .. .. ..)
-                             (.. .. .. .. .. .. .. ..)
-                             (.. .. .. .. .. .. .. ..)
-                             (.. .. .. .. .. .. .. ..)
-                             (.. .. .. .. .. .. .. ..)
-                             (y^ .. .. .. .. .. .. ..)
-                             (y_ BB .. .. YY .. .. ..)
-                             (YY .. .. .. YY RR .. BB)
-                             (.. .. .. RR .. RR .. ..)
-                             (.. .. .. .. .. YY .. ..)
-                             (.. BB .. .. .. .. BB ..)
-                             (-- -- -- -- -- -- -- --)))]
-           ; We favor going from 1 to 3 over going from 2 to 4 (non-latent of course)
-           [g2 (parse-grid '((.. .. .. .. .. .. .. ..)
-                             (.. .. .. .. .. .. .. ..)
-                             (.. .. .. .. .. .. .. ..)
-                             (.. .. .. .. .. .. .. ..)
-                             (.. .. .. .. .. .. .. ..)
-                             (.. .. .. .. .. .. .. ..)
-                             (.. .. .. .. .. .. .. ..)
-                             (.. .. .. .. y^ .. .. ..)
-                             (.. .. .. .. y_ .. .. ..)
-                             (.. BB .. .. YY .. .. ..)
-                             (YY .. .. .. YY RR .. BB)
-                             (.. .. .. RR .. RR .. ..)
-                             (.. .. .. .. .. YY .. ..)
-                             (.. BB .. .. .. .. BB ..)
-                             (-- -- -- -- -- -- -- --)))])
-      (check g1 > g2))
+  (let* ([g1 (parse-grid '((.. .. .. .. .. .. .. ..)
+                           (.. .. .. .. .. .. .. ..)
+                           (.. .. .. .. .. .. .. ..)
+                           (.. .. .. .. .. .. .. ..)
+                           (.. .. .. .. .. .. .. ..)
+                           (.. .. .. .. .. .. .. ..)
+                           (.. .. .. .. .. .. .. ..)
+                           (.. .. .. .. .. .. .. ..)
+                           (y^ .. .. .. .. .. .. ..)
+                           (y_ BB .. .. YY .. .. ..)
+                           (YY .. .. .. YY RR .. BB)
+                           (.. .. .. RR .. RR .. ..)
+                           (.. .. .. .. .. YY .. ..)
+                           (.. BB .. .. .. .. BB ..)
+                           (-- -- -- -- -- -- -- --)))]
+         ; We favor going from 1 to 3 over going from 2 to 4 (non-latent of course)
+         [g2 (parse-grid '((.. .. .. .. .. .. .. ..)
+                           (.. .. .. .. .. .. .. ..)
+                           (.. .. .. .. .. .. .. ..)
+                           (.. .. .. .. .. .. .. ..)
+                           (.. .. .. .. .. .. .. ..)
+                           (.. .. .. .. .. .. .. ..)
+                           (.. .. .. .. .. .. .. ..)
+                           (.. .. .. .. y^ .. .. ..)
+                           (.. .. .. .. y_ .. .. ..)
+                           (.. BB .. .. YY .. .. ..)
+                           (YY .. .. .. YY RR .. BB)
+                           (.. .. .. RR .. RR .. ..)
+                           (.. .. .. .. .. YY .. ..)
+                           (.. BB .. .. .. .. BB ..)
+                           (-- -- -- -- -- -- -- --)))])
+    (check g1 > g2))
 
   (let* ([g1 (parse-grid '((.. .. .. .. .. .. .. ..)
                            (.. .. .. .. .. .. .. ..)
@@ -1562,8 +1560,6 @@
                            (y^ bb YY .. RR .. <b o>)
                            (y_ bb YY .. .. .. bb ..)
                            (-- -- -- -- -- -- -- --)))]
-         [g1 (or (grid-burst g1) g1)]
-         [(g1 groups) (grid-resolve g1 '())]
          [g2 (parse-grid '((.. .. .. .. .. .. .. ..)
                            (.. .. .. .. .. .. .. ..)
                            (.. .. .. <y b> .. .. ..)
@@ -1820,6 +1816,8 @@
                           (YY YY RR RR BB YY BB YY)
                           (RR .. BB YY YY BB .. RR)
                           (-- -- -- -- -- -- -- --)))]
+        ; Prefer to play the <y r> on the right side instead of increasing the
+        ; danger on the left side
         [g2 (parse-grid '((.. .. .. .. .. .. .. ..)
                           (.. .. .. .. .. .. .. ..)
                           (.. .. .. .. .. .. .. ..)
@@ -1866,6 +1864,11 @@
                           (YY y^ b^ bb .. .. .. ..)
                           (BB y_ b_ bb .. .. oo ..)
                           (-- -- -- -- -- -- -- --)))]
+        ; The only remaining fuel is on the left; playing in the middle/right
+        ; is irrelevant here.
+        ; The bug was that we were shattering *everything* so the AI
+        ; assumed that the leftmost <y was guaranteed to fall.
+        ; The fix was to only shatter stable peaks
         [g2 (parse-grid '((.. .. .. .. .. .. .. ..)
                           (.. .. .. .. .. .. .. ..)
                           (.. .. .. .. .. .. .. ..)
@@ -1896,6 +1899,196 @@
                           (.. .. .. .. .. .. .. ..)
                           (.. .. .. .. .. .. .. ..)
                           (.. .. .. .. .. .. .. ..)
+                          (.. .. .. .. .. .. .. ..)
+                          (.. .. .. .. .. .. .. ..)
+                          (.. .. .. .. .. .. .. ..)
+                          (yy .. .. .. .. .. .. ..)
+                          (yy .. b^ .. .. .. .. ..)
+                          (<y r> b_ .. .. .. .. ..)
+                          (.. <r b> .. .. .. .. ..)
+                          (.. <r b> .. .. .. .. ..)
+                          (YY .. BB .. .. .. .. ..)
+                          (BB .. RR .. .. .. .. ..)
+                          (BB .. YY .. .. .. .. ..)
+                          (YY RR BB .. .. r^ .. ..)
+                          (YY RR YY .. .. r_ .. ..)
+                          (RR BB YY .. .. <r y> ..)
+                          (RR .. .. .. .. .. yy ..)
+                          (-- -- -- -- -- -- -- --)))]
+        ; TRICKY - destroying the BB exposes a new problem that didn't
+        ; look like a problem before... Maybe we should add a rule/heuristic
+        ; that "a pillar should never depend on more than one other pillar"
+        ; But then again, probably not because in 500 games this problem only
+        ; happened once. I think we really need to start understanding
+        ; which pillars we intend to destroy and which we intend to fall...
+        [g2 (parse-grid '((.. .. .. .. .. .. .. ..)
+                          (.. .. .. .. .. .. .. ..)
+                          (.. .. .. .. .. .. .. ..)
+                          (.. .. .. .. .. .. .. ..)
+                          (.. .. .. .. .. .. .. ..)
+                          (.. .. .. .. .. .. .. ..)
+                          (.. .. .. .. .. .. .. ..)
+                          (.. .. .. .. .. .. .. ..)
+                          (.. .. .. .. .. .. .. ..)
+                          (yy .. .. .. .. .. .. ..)
+                          (yy .. .. .. .. .. .. ..)
+                          (<y r> .. .. .. .. .. ..)
+                          (.. <r b> .. .. .. .. ..)
+                          (.. <r b> .. .. .. .. ..)
+                          (YY .. BB .. .. .. .. ..)
+                          (BB .. RR .. .. .. .. ..)
+                          (BB .. YY .. .. .. .. ..)
+                          (YY RR BB .. .. r^ .. ..)
+                          (YY RR YY .. .. r_ .. ..)
+                          (RR BB YY .. .. <r y> b^)
+                          (RR .. .. .. .. .. yy b_)
+                          (-- -- -- -- -- -- -- --)))])
+    (check g1 > g2))
+
+  (let ([g1 (parse-grid '((.. .. .. .. .. .. .. ..)
+                          (.. .. .. .. .. .. .. ..)
+                          (.. .. .. .. .. .. .. ..)
+                          (.. .. .. .. .. .. .. ..)
+                          (.. .. .. .. .. .. .. ..)
+                          (.. .. .. .. .. .. .. ..)
+                          (.. .. .. .. .. .. .. ..)
+                          (.. .. .. .. b^ .. .. ..)
+                          (.. .. .. .. b_ .. <y b>)
+                          (.. .. .. .. BB .. .. BB)
+                          (.. .. .. .. .. RR .. ..)
+                          (YY .. .. .. .. YY .. ..)
+                          (.. .. .. .. .. .. YY ..)
+                          (.. .. oo .. BB .. .. ..)
+                          (-- -- -- -- -- -- -- --)))]
+        ; Regression: the shatter operation was naive, and the grid below played
+        ; the <b b> thinking it would get a horizontal combo with the two BBs.
+        ; Obviously this is not correct because the rightmost BB would be gone.
+        ; This is why we now use alternate colors for shattered pillars.
+        ; In the below example, the rightmost blues would be assigned the color
+        ; 'b2 instead of 'b after being shattered.
+        ; (Should the shatter operation simply destroy them instead?)
+        [g2 (parse-grid '((.. .. .. .. .. .. .. ..)
+                          (.. .. .. .. .. .. .. ..)
+                          (.. .. .. .. .. .. .. ..)
+                          (.. .. .. .. .. .. .. ..)
+                          (.. .. .. .. .. .. .. ..)
+                          (.. .. .. .. .. .. .. ..)
+                          (.. .. .. .. .. .. .. ..)
+                          (.. .. .. .. .. <b b> ..)
+                          (.. .. .. .. .. .. <y b>)
+                          (.. .. .. .. BB .. .. BB)
+                          (.. .. .. .. .. RR .. ..)
+                          (YY .. .. .. .. YY .. ..)
+                          (.. .. .. .. .. .. YY ..)
+                          (.. .. oo .. BB .. .. ..)
+                          (-- -- -- -- -- -- -- --)))])
+    (check g1 > g2))
+
+  (let ([g1 (parse-grid '((.. .. .. .. .. .. .. ..)
+                          (.. .. .. .. .. .. .. ..)
+                          (.. .. .. .. .. .. .. b^)
+                          (.. .. .. .. .. .. .. r_)
+                          (.. .. .. .. .. .. .. r^)
+                          (.. .. .. .. .. .. .. o_)
+                          (.. .. .. .. .. .. .. r^)
+                          (.. .. .. .. .. <r y> b_)
+                          (.. .. .. .. .. .. <y b>)
+                          (.. .. .. .. .. .. <y b>)
+                          (.. .. .. .. .. .. YY ..)
+                          (.. .. .. .. .. .. .. ..)
+                          (.. oo .. .. .. .. .. ..)
+                          (.. bb .. .. .. .. .. oo)
+                          (-- -- -- -- -- -- -- --)))]
+        [g2 (parse-grid '((.. .. .. .. .. .. .. ..)
+                          (.. .. .. .. .. .. .. ..)
+                          (.. .. .. .. .. .. .. b^)
+                          (.. .. .. .. .. .. .. r_)
+                          (.. .. .. .. .. .. .. r^)
+                          (.. .. .. .. .. .. .. o_)
+                          (.. .. .. .. .. .. .. r^)
+                          (.. .. .. .. .. .. .. b_)
+                          (.. .. .. .. .. .. <y b>)
+                          (.. .. .. .. .. .. <y b>)
+                          (.. .. .. .. .. .. YY ..)
+                          (.. .. .. .. .. .. .. ..)
+                          (.. oo .. .. .. .. .. ..)
+                          (.. bb .. <r y> .. .. oo)
+                          (-- -- -- -- -- -- -- --)))])
+    (check g1 > g2))
+
+  (let ([g1 (parse-grid '((.. .. .. .. .. .. .. ..)
+                          (.. .. .. .. .. .. .. ..)
+                          (.. .. .. .. .. .. .. ..)
+                          (.. .. .. .. .. .. .. ..)
+                          (.. .. .. .. .. .. .. ..)
+                          (.. .. .. .. .. .. .. ..)
+                          (.. .. .. .. .. .. .. ..)
+                          (.. .. .. .. .. .. .. ..)
+                          (.. .. .. .. .. .. <y b>)
+                          (.. .. .. .. .. .. <y b>)
+                          (.. .. .. .. .. .. YY ..)
+                          (.. .. .. .. .. .. .. ..)
+                          (.. .. .. .. .. .. .. ..)
+                          (yy .. .. <r b> .. .. oo)
+                          (-- -- -- -- -- -- -- --)))]
+        [g2 (parse-grid '((.. .. .. .. .. .. .. ..)
+                          (.. .. .. .. .. .. .. ..)
+                          (.. .. .. .. .. .. .. ..)
+                          (.. .. .. .. .. .. .. ..)
+                          (.. .. .. .. .. .. .. ..)
+                          (.. .. .. .. .. .. .. ..)
+                          (.. .. .. .. .. .. .. r^)
+                          (.. .. .. .. .. .. .. b_)
+                          (.. .. .. .. .. .. <y b>)
+                          (.. .. .. .. .. .. <y b>)
+                          (.. .. .. .. .. .. YY ..)
+                          (.. .. .. .. .. .. .. ..)
+                          (.. .. .. .. .. .. .. ..)
+                          (yy .. .. .. .. .. .. oo)
+                          (-- -- -- -- -- -- -- --)))])
+    (check g1 > g2))
+
+  (let ([g1 (parse-grid '((.. .. .. .. .. .. .. ..)
+                          (.. .. .. .. .. .. .. ..)
+                          (.. .. .. .. .. .. .. ..)
+                          (.. .. .. .. .. .. .. ..)
+                          (.. .. .. .. .. .. .. ..)
+                          (.. .. .. .. .. .. .. ..)
+                          (.. .. .. .. .. .. .. ..)
+                          (.. .. .. .. .. .. .. ..)
+                          (.. .. .. .. .. .. .. ..)
+                          (<r y> .. .. bb .. .. ..)
+                          (<r y> .. .. bb <b y> BB)
+                          (RR .. .. .. BB BB .. ..)
+                          (YY .. YY .. .. .. YY RR)
+                          (.. YY .. rr .. .. .. ..)
+                          (-- -- -- -- -- -- -- --)))]
+        ; Regression: a naive approach to shatter thinks we will get a yellow
+        ; horizontal group in the grid below.
+        ; So we consider only vertical groups after the shatter.
+        [g2 (parse-grid '((.. .. .. .. .. .. .. ..)
+                          (.. .. .. .. .. .. .. ..)
+                          (.. .. .. .. .. .. .. ..)
+                          (.. .. .. .. .. .. .. ..)
+                          (.. .. .. .. .. .. .. ..)
+                          (.. .. .. .. .. .. .. ..)
+                          (.. .. .. .. .. .. .. ..)
+                          (.. .. .. .. .. .. .. ..)
+                          (.. .. .. .. .. .. .. ..)
+                          (<r y> .. .. bb .. .. ..)
+                          (<r y> .. .. bb .. .. BB)
+                          (RR .. <b y> BB BB .. ..)
+                          (YY .. YY .. .. .. YY RR)
+                          (.. YY .. rr .. .. .. ..)
+                          (-- -- -- -- -- -- -- --)))])
+    (check g1 > g2))
+
+  (let ([g1 (parse-grid '((.. .. .. .. .. .. .. ..)
+                          (.. .. .. .. .. .. .. ..)
+                          (.. .. .. .. .. .. .. ..)
+                          (.. .. .. .. .. .. .. ..)
+                          (.. .. .. .. .. .. .. ..)
+                          (.. .. .. .. .. .. .. ..)
                           (.. .. .. .. r^ .. .. ..)
                           (.. .. .. .. r_ .. .. ..)
                           (.. .. .. .. <o r> .. ..)
@@ -1912,7 +2105,6 @@
                           (.. BB RR .. YY RR RR YY)
                           (.. .. BB BB RR BB .. BB)
                           (-- -- -- -- -- -- -- --)))]
-        ; TODO: broken peak is just silly right now
         [g2 (parse-grid '((.. .. .. .. .. .. .. ..)
                           (.. .. .. .. .. .. .. ..)
                           (.. .. .. .. .. .. .. ..)
@@ -1934,6 +2126,99 @@
                           (.. bb yy .. RR YY .. ..)
                           (.. BB RR .. YY RR RR YY)
                           (.. .. BB BB RR BB .. BB)
+                          (-- -- -- -- -- -- -- --)))])
+    (check g1 > g2))
+
+  (let ([g1 (parse-grid '((.. .. .. .. .. .. .. ..)
+                          (.. .. .. .. .. .. .. ..)
+                          (.. .. .. .. .. .. .. ..)
+                          (.. .. .. .. .. .. .. ..)
+                          (.. .. .. .. .. .. .. ..)
+                          (.. .. .. .. .. .. .. ..)
+                          (.. .. b^ .. .. .. .. ..)
+                          (<b r> b_ .. .. .. .. ..)
+                          (.. <r o> .. .. .. .. BB)
+                          (.. .. bb .. .. bb .. YY)
+                          (.. .. BB .. .. BB YY ..)
+                          (.. .. .. BB .. RR BB BB)
+                          (.. .. .. BB BB RR BB YY)
+                          (BB rr YY YY .. .. RR YY)
+                          (YY RR BB .. RR RR BB ..)
+                          (BB YY YY BB BB YY RR BB)
+                          (YY .. .. BB RR RR BB ..)
+                          (YY RR BB RR RR BB RR YY)
+                          (RR .. YY RR BB YY BB YY)
+                          (YY RR .. YY YY BB RR RR)
+                          (YY .. YY .. .. RR RR YY)
+                          (-- -- -- -- -- -- -- --)))]
+        [g2 (parse-grid '((.. .. .. .. .. .. .. ..)
+                          (.. .. .. .. .. .. .. ..)
+                          (.. .. .. .. .. .. .. ..)
+                          (.. .. .. .. .. .. .. ..)
+                          (.. .. .. .. .. .. .. ..)
+                          (.. .. .. .. .. .. .. ..)
+                          (.. .. .. .. .. .. .. ..)
+                          (<b r> .. .. .. b^ .. ..)
+                          (.. <r o> .. .. b_ .. BB)
+                          (.. .. bb .. .. bb .. YY)
+                          (.. .. BB .. .. BB YY ..)
+                          (.. .. .. BB .. RR BB BB)
+                          (.. .. .. BB BB RR BB YY)
+                          (BB rr YY YY .. .. RR YY)
+                          (YY RR BB .. RR RR BB ..)
+                          (BB YY YY BB BB YY RR BB)
+                          (YY .. .. BB RR RR BB ..)
+                          (YY RR BB RR RR BB RR YY)
+                          (RR .. YY RR BB YY BB YY)
+                          (YY RR .. YY YY BB RR RR)
+                          (YY .. YY .. .. RR RR YY)
+                          (-- -- -- -- -- -- -- --)))])
+    (check g1 > g2))
+
+  (let ([g1 (parse-grid '((.. .. .. .. .. .. .. ..)
+                          (.. .. .. .. .. .. .. ..)
+                          (.. .. .. .. .. .. .. ..)
+                          (.. .. .. .. .. .. .. ..)
+                          (.. .. .. .. .. .. .. ..)
+                          (.. .. .. .. .. .. .. ..)
+                          (.. .. .. .. .. .. .. ..)
+                          (.. .. .. .. <r y> <b r>)
+                          (.. oo yy .. .. yy BB RR)
+                          (BB BB YY .. .. YY RR BB)
+                          (YY RR BB YY .. RR YY BB)
+                          (YY YY RR BB BB YY BB RR)
+                          (RR YY BB RR BB .. BB RR)
+                          (.. .. BB YY RR .. RR BB)
+                          (.. YY YY BB .. YY YY BB)
+                          (YY RR BB RR YY YY .. RR)
+                          (RR BB .. .. YY .. YY ..)
+                          (.. .. RR BB RR RR YY RR)
+                          (RR RR YY YY RR BB .. BB)
+                          (BB BB .. RR .. BB YY RR)
+                          (.. YY .. YY YY RR BB YY)
+                          (-- -- -- -- -- -- -- --)))]
+        ; Regression: The oo in the 2nd column was burst for no reason.
+        [g2 (parse-grid '((.. .. .. .. .. .. .. ..)
+                          (.. .. .. .. .. .. .. ..)
+                          (.. .. .. .. .. .. .. ..)
+                          (.. .. .. .. .. .. .. ..)
+                          (.. .. .. .. .. .. .. ..)
+                          (.. .. .. .. .. .. .. ..)
+                          (.. .. .. .. .. .. .. ..)
+                          (.. .. .. .. <r y> <b r>)
+                          (.. .. yy .. .. yy BB RR)
+                          (BB BB YY .. .. YY RR BB)
+                          (YY RR BB YY .. RR YY BB)
+                          (YY YY RR BB BB YY BB RR)
+                          (RR YY BB RR BB .. BB RR)
+                          (.. .. BB YY RR .. RR BB)
+                          (.. YY YY BB .. YY YY BB)
+                          (YY RR BB RR YY YY .. RR)
+                          (RR BB .. .. YY .. YY ..)
+                          (.. .. RR BB RR RR YY RR)
+                          (RR RR YY YY RR BB .. BB)
+                          (BB BB .. RR .. BB YY RR)
+                          (.. YY .. YY YY RR BB YY)
                           (-- -- -- -- -- -- -- --)))])
     (check g1 > g2))
   ) ; end test submodule
