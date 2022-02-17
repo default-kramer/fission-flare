@@ -1,6 +1,6 @@
 #lang typed/racket
 
-; This file makes the AI many games to completion, and verifies that each
+; This file makes the AI run many games to completion, and verifies that each
 ; game is completed and that the average energy does not regress.
 ; This can take a long time to run, so we use places.
 
@@ -85,10 +85,13 @@
   (define worker-queue (ann (make-async-channel)
                             (Async-Channelof Place-Channel)))
 
+  (define num-places (processor-count))
+  (println (format "running ai-exercise using ~a places" num-places))
+
   ; Create workers and add them to the queue.
   ; Also hold onto them in this list so we can clean them up later.
   (define all-workers : (Listof Place)
-    (for/list ([i (in-range 8)])
+    (for/list ([i (in-range num-places)])
       (let ([worker (make-worker)])
         (async-channel-put worker-queue worker)
         worker)))
@@ -214,8 +217,8 @@
             (misc:combos-require-fuel? . #f)
             (misc:random-seed . ,seed))))
 
-  (run-trials 1000 mini-layout-settings 11209)
-  (run-trials 500 standard-layout-settings 27921)
+  (run-trials 1000 mini-layout-settings 11216)
+  (run-trials 500 standard-layout-settings 27943)
 
   ; Clean up all the places
   (for ([worker all-workers])

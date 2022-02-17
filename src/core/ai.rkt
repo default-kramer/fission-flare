@@ -1,6 +1,5 @@
 #lang typed/racket
 
-;(provide choose-move)
 (provide (rename-out [get-plan choose-move]))
 (module+ exercise-help
   (provide fast-forward))
@@ -154,13 +153,8 @@
 ; * i > j
 ; * Qi and Qj do not share a pillar
 ; * Every cell between Pi and Pj is occupied by a non-blank
-;   TODO need to try this 3rd bullet point out...
-;   It seems like it could handle the pathological case better.
-;   Or it could handle it worse!
-;   We don't want to get in a situation where blockage B only gets noticed
-;   after clearing blockage A, because then the AI won't see much value
-;   in clearing blockage A.
-
+;   - This point is not necessary but it slightly improves the AI's play
+;
 ; In the previous example, A3 and A5 do not share a pillar because A4 is an
 ; empty cell. But a color-mismatch could also cause a blockage.
 ; Or even if the A4 cell was a blank catalyst it would still be a blockage.
@@ -251,16 +245,9 @@
                      [D4 C4] [D5 E5] [D7 E7] [D8 C8]
                      [E5 D5] [E7 D7]})
     (check #:blockages a
-           {([E7 D7] [E5 D5])
-            ;([D7 E7] [D5 E5]) nope, because E5 and E7 do share a pillar
-            ([D8 C8] [D4 C4])
-            ([C8 D8] [C4 D4])
-            ([C9 B9] [C3 B3])})))
+           {([E7 D7] [E5 D5])})))
 ; That seems reasonable.
-; If we look at the first cell named by each blockage, we see E7 D8 C8 and C9
-; and those would certainly be nice to clear.
-; And that principle seems to hold with all the previous examples.
-; Can I find a counterexample to the "first cell named" idea?
+; The E5-E7 pillar is the critical point and should be destroyed ASAP.
 ; How about this:
 (module+ test
   (let ([a (grid-analyze
@@ -357,7 +344,8 @@
                   [pillars : (Matrixof (U #f Pillar))]
                   [pillar-list : (Listof Pillar)]
                   [dependencies : Deps]
-                  [blockages : Blockages])
+                  [blockages : Blockages]
+                  [problematic-proc : Problematic?])
   #:type-name Analysis
   #:transparent)
 
@@ -507,8 +495,9 @@
            (= (loc-x Qi) (loc-x Qj))
            ((loc-y Pi) . > . (loc-y Pj))
            (not (share-pillar? Qi Qj))
-           ; Skip this for now and see if it matters
-           #;(fully-occupied? Pi Pj))))
+           ; Everything seems to work fine without the following check,
+           ; but it does slightly improve both mini and standard
+           (fully-occupied? Pi Pj))))
 
   (let* ([deps : (Listof Dep) (hash->list deps)]
          ; TODO Slow code maybe?
@@ -531,7 +520,9 @@
       (and pillar (pillar-stable? pillar))))
   (define deps (find-deps grid stable?))
   (define blockages (find-blockages grid pillars deps))
-  (analysis grid (second result) pillars (third result) deps blockages))
+  (define problematic-proc (make-problematic-proc grid))
+  (analysis grid (second result) pillars (third result) deps blockages
+            problematic-proc))
 
 
 ; These "check-" functions are just to help the test submodule.
@@ -722,32 +713,67 @@
           (grid-shatter grid groups))
         (values grid a groups))))
 
-(: problematic? (-> Pillar Grid Boolean))
-; A run is problematic if it blocks vertical access to fuel.
-(define (problematic? p grid)
+(define-type Problematic? (-> (U Loc Pillar) Boolean))
 
-  (: fuel-below? (-> Integer Integer Boolean))
-  ; TODO could use some caching/dynamic programming here...
-  ; Should get migrated to the new Analysis anyway.
-  (define (fuel-below? [x : Integer] [y : Integer])
+(: make-problematic-proc (-> Grid Problematic?))
+; Constructs the `problematic?` procedure.
+; Imprecise: A location is problematic if it contains fuel or
+; if it blocks vertical access to fuel.
+; Precise: A location is problematic if any of these is true:
+; * It contains fuel
+; * It is above a problematic location (in the same column)
+; * It contains a catalyst whose partner satisfies *all* of these:
+;   1) direction is left or right
+;   2) has an empty space below
+;   3) is above a location
+;
+; If any location in a pillar `Px` is problematic, the top of that pillar `Pt`
+; is guaranteed to be problematic because
+#;(or (equal? Pt Px) (Pt . is-above? . Px))
+; is always true.
+; Therefore a pillar is problematic iff its top location is problematic.
+(define (make-problematic-proc grid)
+  (define w (grid-width grid))
+  (define h (grid-height grid))
+  (define cache (make-matrix w h (ann 'unset (U Boolean 'unset))))
+
+  (: get-result (-> Integer Integer Boolean))
+  (define (get-result x y)
     (define (key-point? [x : Integer] [y : Integer])
       (and (not (grid-get grid (make-loc x y)))
-           (fuel-below? x (sub1 y))))
-    (if (y . < . 0)
-        #f
-        (let ([occ (grid-get grid (make-loc x y))])
-          (or (fuel? occ)
-              (fuel-below? x (sub1 y))
-              (and (catalyst? occ)
-                   (case (catalyst-direction occ)
-                     [(l) (key-point? (sub1 x) (sub1 y))]
-                     [(r) (key-point? (add1 x) (sub1 y))]
-                     [else #f]))))))
+           (problematic? (make-loc x (sub1 y)))))
+    (let ([occ (grid-get grid (make-loc x y))])
+      (cond
+        [(fuel? occ)
+         #t]
+        [(y . < . 1)
+         #f]
+        [(problematic? (make-loc x (sub1 y)))
+         #t]
+        [(catalyst? occ)
+         (case (catalyst-direction occ)
+           [(l) (key-point? (sub1 x) (sub1 y))]
+           [(r) (key-point? (add1 x) (sub1 y))]
+           [else #f])]
+        [else #f])))
 
-  (let* ([hi (pillar-hi p)]
-         [y (loc-y hi)]
-         [x (loc-x hi)])
-    (fuel-below? x y)))
+  (: problematic? (-> Loc Boolean))
+  (define (problematic? loc)
+    (let ([result (matrix-get cache loc)])
+      (case result
+        [(#t) #t]
+        [(#f) #f]
+        [(unset)
+         (let ([result (get-result (loc-x loc) (loc-y loc))])
+           (matrix-set! cache loc result)
+           result)])))
+
+  (lambda ([x : (U Loc Pillar)])
+    (let ([loc (if (pillar? x)
+                   (pillar-hi x)
+                   x)])
+      (and (in-bounds? grid loc)
+           (problematic? loc)))))
 
 (module+ test
   (let ([a (grid-analyze
@@ -769,12 +795,9 @@
             [-2 YY y^ b^ bb .. ..]
             [-1 BB y_ b_ bb .. ..]
             [-- A: B: C: D: E: F:])])
-    (let ([p1 (or (analysis-pillar a B11)
-                  (fail "expected pillar"))]
-          [p2 (or (analysis-pillar a E4)
-                  (fail "expected pillar"))])
-      (check #:true (problematic? p1 (analysis-grid a)))
-      (check #:true (not (problematic? p2 (analysis-grid a)))))))
+    (let ([problematic? (analysis-problematic-proc a)])
+      (check #:true (problematic? B11))
+      (check #:true (not (problematic? E4))))))
 
 (: fxsum (-> (Listof Fixnum) Fixnum))
 (define (fxsum nums)
@@ -819,10 +842,11 @@
 
 (: score-pillars (-> Analysis Fixnum))
 (define (score-pillars a)
-  (let ([pillars (analysis-pillar-list a)])
+  (let ([pillars (analysis-pillar-list a)]
+        [problematic? (analysis-problematic-proc a)])
     (fxsum
      (for/list ([p pillars])
-       (if (problematic? p (analysis-grid a))
+       (if (problematic? p)
            (begin
              (case (pillar-length p)
                ; Ending these with a 1 means the last 2 digits of the sum
