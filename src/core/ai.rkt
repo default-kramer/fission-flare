@@ -300,7 +300,8 @@
 (struct pillar ([lo : Loc] ; lower loc
                 [hi : Loc] ; higher loc, might be same as lower
                 [color : Color]
-                [stable? : Boolean])
+                [stable? : Boolean]
+                [below : (U #f Pillar)])
   #:type-name Pillar
   #:transparent)
 
@@ -411,6 +412,7 @@
 
   (for ([x (in-range w)])
     (define current-pillar : (U #f Pillar) #f)
+    (define prev-pillar : (U #f Pillar) #f)
     (define color-mismatch-counter : (Pairof Color Fixnum) (cons #f 0))
     (define peak : Loc (make-loc x 0))
     (for ([y (in-range h)])
@@ -439,8 +441,9 @@
                               (ground? occ)
                               (and (not (can-burst? occ))
                                    (is-stable? x (sub1 y))))])
-            (let ([p (pillar start end color stable?)])
+            (let ([p (pillar start end color stable? prev-pillar)])
               (set! current-pillar p)
+              (set! prev-pillar p)
               (set! all-pillars (cons p all-pillars)))
             (matrix-set! matrix loc current-pillar)))))
     (set! stats (cons (column-stats (cdr color-mismatch-counter) peak)
@@ -901,9 +904,10 @@
   (let* ([width (grid-width grid-a)]
          [height (grid-height grid-a)]
          [blank-score (score-blanks grid-a)]
-         [bursted? (grid-burst grid-a)]
          [(grid-a-resolved groups-a)
           (grid-resolve grid-a '())]
+         [analysis-a (grid-analysis grid-a-resolved)]
+         [bursted? (grid-burst grid-a)]
          [grid-b (or bursted? grid-a)]
          [(grid-b groups-b)
           (grid-resolve grid-b '())]
@@ -945,8 +949,7 @@
          ; * standard is 27921 (best so far)
          [breathing-room-score
           (if (param-is optimize-for 'mini)
-              (let* ([analysis (grid-analysis grid-a-resolved)]
-                     [column-stats (analysis-column-stats analysis)])
+              (let ([column-stats (analysis-column-stats analysis-a)])
                 (fxsum
                  (for/list ([x (in-range width)])
                    (let* ([stats (vector-ref column-stats x)]
@@ -1025,8 +1028,8 @@
     (and new-state
          (list new-state (append old-seq new-seq)))))
 
-(: foo (-> (U Action (Listof Action)) Boolean (-> Possibility (Listof Possibility))))
-(define (foo action repeat?)
+(: iterate (-> (U Action (Listof Action)) Boolean (-> Possibility (Listof Possibility))))
+(define (iterate action repeat?)
   (: go (-> Possibility (Listof Possibility)))
   (define (go [poss : Possibility])
     (let* ([result (try poss action)])
@@ -1043,8 +1046,8 @@
 (define (catalyst-positions state)
   (let ([rots (get-rotations state)])
     (append rots
-            (flatmap (foo (move 'l) #t) rots)
-            (flatmap (foo (move 'r) #t) rots))))
+            (flatmap (iterate (move 'l) #t) rots)
+            (flatmap (iterate (move 'r) #t) rots))))
 
 (: fast-forward (-> State State))
 (define (fast-forward state)
@@ -1062,7 +1065,7 @@
          [actions (case kind
                     [(plummet) (list (plummet))]
                     [(burst) (list (plummet) (burst))])]
-         [possis (flatmap (foo actions #f) (catalyst-positions state))]
+         [possis (flatmap (iterate actions #f) (catalyst-positions state))]
          [choices (map (lambda ([p : Possibility])
                          (ann (cons (score p) p) Choice))
                        possis)]
@@ -1442,7 +1445,11 @@
                           [YY .. .. .. ..]))])
     (check g1 > g2))
 
-  ; TODO fix and uncomment this one
+  ; We could make this test pass by adding a small penalty to stable pillars
+  ; that are above another pillar of the same color. But adding this penalty
+  ; causes the AI to play worse. It seems that the simple 2-ply analysis to
+  ; determine whether bursting on move N allows us to play a better move N+1
+  ; is a better way to handle this problem, and probably other problems too.
   #;(let ([g1 (parse-grid '([.. .. .. ..]
                             [.. .. .. ..]
                             [.. .. .. ..]
@@ -1455,10 +1462,10 @@
                             [.. .. .. BB]
                             [.. .. .. ..]
                             [.. .. YY RR]))]
-          ; g2 demonstrates a special kind of problem, where the upper blues
-          ; are blocking access to the lower blue because they are the same color.
-          ; In g1 the lower color is red, so it is not a problem; you are able
-          ; to make progress on the red without bursting the blues.
+          ; In g1 above, we are able to make progress on the RR without bursting
+          ; and destroying the upper BB pillar.
+          ; But in g2 below, we are not able to make progress on the lower BB
+          ; without bursting and destroying the upper BB pillar.
           [g2 (parse-grid '([.. .. .. ..]
                             [.. .. .. ..]
                             [.. .. .. ..]
