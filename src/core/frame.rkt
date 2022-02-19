@@ -294,9 +294,8 @@
        (car (next-frame frame))]
       [else 'unreachable])))
 
-; TODO just winging it from here on out, think before committing...
-
+(: frame-waiting? (-> Frame Boolean))
 (define (frame-waiting? [frame : Frame])
   (case (cadr (frame-info frame))
     [(waiting) #t]
-    [else #f]))
+    [(game-over bursting destroying falling spawning) #f]))

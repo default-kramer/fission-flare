@@ -8,12 +8,6 @@
          "../typed-utils.rkt"
          "../core.rkt")
 
-; TODO illegal requires, DO NOT CHECK IN
-(require "../core/ai.rkt"
-         (only-in "../core/data.rkt" state-grid)
-         (only-in "../core/grid.rkt" print-grid)
-         (only-in "../core/frame.rkt" frame-waiting?))
-
 (define-type Pict pict)
 
 (define sync-delay 150) ; wait at least this many milliseconds between sync requests
@@ -170,7 +164,7 @@
           (let* ([actions (translate-actions (cadr plan))]
                  ; always start the sequence by releasing the drop key
                  [actions (cons (action:drop-keyup) actions)])
-            (pretty-print (print-grid (state-grid state)))
+            ;(pretty-print (print-grid (state-grid state)))
             (set! pending-actions actions))
           (fail "The only way to win is not to play...?"))))
 
