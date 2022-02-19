@@ -1,7 +1,7 @@
 #lang typed/racket
 
 (provide make-initial-state make-empty-state state-get state-width state-height
-         state-apply state-next-spawns state-waiting-frame)
+         state-apply state-next-spawns state-waiting-frame parse-state)
 
 (require "data.rkt"
          "grid.rkt"
@@ -1048,11 +1048,14 @@
            [part-b (shuffle '(r r y y b b) prng)])
       (take (append part-a part-b) count)))
 
-  (: add-fuels (-> Pseudo-Random-Generator Grid (Vectorof Boolean) Grid))
+  (: add-fuels (-> Pseudo-Random-Generator Grid (Vectorof Boolean) Integer (U #f Grid)))
   ; Add fuels to the given grid according to the given pattern.
   ; Do this in batches of peaks.
-  (define (add-fuels prng grid pattern)
-    (let* ([peaks (find-peaks grid pattern)]
+  ; It is possible to get stuck, in which case we bail out and return #f
+  (define (add-fuels prng grid pattern retries)
+    (let* (#:break (when (retries . > . 9)
+                     #f)
+           [peaks (find-peaks grid pattern)]
            #:break (when (empty? peaks)
                      grid)
            [colors (choose-colors prng (length peaks))]
@@ -1067,8 +1070,8 @@
             (grid-destroy new-grid 3)]
            #:break (when (not (empty? groups))
                      ; Something was destroyed, discard result and try again
-                     (add-fuels prng grid pattern)))
-      (add-fuels prng new-grid pattern)))
+                     (add-fuels prng grid pattern (add1 retries))))
+      (add-fuels prng new-grid pattern 0)))
 
   ; main body
   (let* ([ls (state-layout-state state)]
@@ -1091,7 +1094,12 @@
                   (make-vector pattern-size #f)]
          [pattern (create-pattern prng pattern fuel-count)]
          ; Apply pattern
-         [grid (add-fuels prng grid pattern)]
+         [grid (or (add-fuels prng grid pattern 0)
+                   (add-fuels prng grid pattern 0)
+                   (add-fuels prng grid pattern 0)
+                   ; Only about 6 out of 1000 fails, so getting 3 in a row
+                   ; means something else is probably wrong
+                   (fail "failed to add fuel, invalid game settings maybe?"))]
          [rand-vec (prng->vector prng)]
          [ls (struct-copy LayoutState ls
                           [remaining-wave-count (and wave-count
@@ -1121,3 +1129,22 @@
 (: state-height (-> State Dimension))
 (define (state-height state)
   (grid-height (state-grid state)))
+
+; Parse a state from a textual representation of a grid and the catalyst queue
+(: parse-state (-> (Listof (Listof Symbol)) (Listof Symbol) State))
+(define (parse-state grid-pattern queue-pattern)
+  (define (convert-queue-item [item : (Pairof Catalyst Catalyst)])
+    ; parse-queue returns catatlyst pairs but we only need the colors:
+    (cons (catalyst-color (car item))
+          (catalyst-color (cdr item))))
+  (let* ([grid (parse-grid grid-pattern)]
+         [queue (parse-queue queue-pattern)]
+         [queue (map convert-queue-item queue)]
+         [state (make-empty-state (grid-width grid) (grid-height grid))]
+         [spawn-state (state-spawn-state state)]
+         [spawn-state (struct-copy SpawnState spawn-state
+                                   [card-stack queue])]
+         [state (struct-copy State state
+                             [grid grid]
+                             [spawn-state spawn-state])])
+    state))

@@ -25,7 +25,9 @@
 (define loc-y cdr)
 
 ; red, yellow, blue, #f = blank
-(define-type Color (U 'r 'y 'b #f))
+; The alternate colors (r2 y2 b2) are only used by the AI while exploring
+; possible ways that incomplete groups might be completed.
+(define-type Color (U 'r 'y 'b #f 'r2 'y2 'b2))
 
 ; up, right, down, left
 (define-type Direction (U 'u 'r 'd 'l))

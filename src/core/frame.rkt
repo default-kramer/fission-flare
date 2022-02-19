@@ -1,7 +1,9 @@
 #lang typed/racket
 
 (provide make-first-frame next-frame frame-do-action frame-apply-action
-         frame-extra-occs frame-time-remaining frame-fast-forward frame-catch-up)
+         frame-extra-occs frame-time-remaining frame-fast-forward frame-catch-up
+         frame-waiting?
+         )
 
 (require "data.rkt" "state.rkt" "../typed-utils.rkt")
 
@@ -291,3 +293,9 @@
       [(bursting destroying falling spawning)
        (car (next-frame frame))]
       [else 'unreachable])))
+
+(: frame-waiting? (-> Frame Boolean))
+(define (frame-waiting? [frame : Frame])
+  (case (cadr (frame-info frame))
+    [(waiting) #t]
+    [(game-over bursting destroying falling spawning) #f]))

@@ -2,7 +2,7 @@
 
 (provide grid-modifier GridModifier grid-fall grid-burst grid-destroy
          grid-locs grid-count in-bounds? grid-clear
-         parse-grid print-grid parse-occupant
+         parse-grid print-grid parse-occupant parse-queue
          )
 
 (require "data.rkt"
@@ -232,10 +232,12 @@
   (or (mod! 'build)
       (fail "grid-after-destroy failed")))
 
+(define-type Mode (U 'vertical 'horizontal 'both))
+
 ; Finds rows and columns of adjacent occupants sharing the same color.
 ; A group-count of 4 means the group must contain 4 or more occupants.
-(: find-destruction-groups (-> Grid Integer (Listof DestructionGroup)))
-(define (find-destruction-groups grid group-count)
+(: find-destruction-groups (-> Grid Integer Mode (Listof DestructionGroup)))
+(define (find-destruction-groups grid group-count mode)
   (define width (grid-width grid))
   (define height (grid-height grid))
 
@@ -304,16 +306,17 @@
       ; We've reached the end of the row or column:
       (finish-group!)))
 
-  ; Search for rows, then for columns
-  (find-groups! width height make-loc)
-  (find-groups! height width (lambda (i j) (make-loc j i)))
+  (when (member mode '(vertical both))
+    (find-groups! width height make-loc))
+  (when (member mode '(horizontal both))
+    (find-groups! height width (lambda (i j) (make-loc j i))))
   groups)
 
-(: grid-destroy (->* (Grid) (Integer) (values (U #f Grid)
-                                              (Listof DestructionGroup))))
-(define (grid-destroy grid [group-count 4])
+(: grid-destroy (->* (Grid) (Integer #:mode Mode)
+                     (values (U #f Grid) (Listof DestructionGroup))))
+(define (grid-destroy grid [group-count 4] #:mode [mode 'both])
   (define groups : (Listof DestructionGroup)
-    (find-destruction-groups grid group-count))
+    (find-destruction-groups grid group-count mode))
   (if (empty? groups)
       (values #f groups)
       (let ([mod! (grid-modifier grid)])
@@ -452,6 +455,8 @@
       [sym : Symbol '(RR YY BB)])
   (add-parser sym (make-fuel color #f)))
 
+(add-parser '-- (ground))
+
 (: parse-occupant (-> Symbol (U #f Occupant)))
 (define (parse-occupant sym)
   (case sym
@@ -461,6 +466,20 @@
             (if result
                 (cdr result)
                 (fail "cannot parse:" sym)))]))
+
+(: parse-queue (-> (Listof Symbol) (Listof (Pairof Catalyst Catalyst))))
+(define (parse-queue queue)
+  (match queue
+    [(list) (list)]
+    [(list a b rest ...)
+     (let ([left (parse-occupant a)]
+           [right (parse-occupant b)])
+       (when (or (not (catalyst? left))
+                 (not (catalyst? right)))
+         (fail "Invalid queue - contains non-catalyst:" left right))
+       (cons (cons left right) (parse-queue rest)))]
+    [(list a)
+     (fail "Invalid queue - odd number of occupants")]))
 
 (: parse-grid (-> (Listof (Listof Symbol)) Grid))
 (define (parse-grid rows)
@@ -500,3 +519,25 @@
          [grid (parse-grid pattern)]
          [p2 (print-grid grid)])
     (check-equal? pattern p2)))
+
+
+(: grid-vertical-divorce (-> Grid Grid))
+; If we rotate a <y r> by 90 degrees in either direction and place it on a grid,
+; we can divorce the two halves and it will make no difference as the
+; game continues. For example, the following
+#;([.. y^ ..]
+   [.. r_ ..]
+   [anything])
+; is completely equivalent to the divorced version
+#;([.. yy ..]
+   [.. rr ..]
+   [anything])
+; because if the rr drops one cell, the yy will also drop one cell.
+; And if the yy is destroyed, the rr is what would be left over anyway.
+; And if both are destroyed, it obviously doesn't matter anymore.
+; This is still true with blanks.
+; Normalizing to the divorced version could make analysis easier, because we
+; have to handle singles like yy and rr no matter what.
+; Also, typing y^ is harder than typing yy.
+(define (grid-vertical-divorce g)
+  (error "not implemented"))

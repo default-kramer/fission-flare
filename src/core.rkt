@@ -24,7 +24,7 @@
          GameSettings game-settings? default-game-settings game-settings-penalty:resistance
          settings->assoc assoc->settings
          ; Frame
-         Frame frame? frame-state frame-counter frame-info frame-timing
+         Frame frame? frame-state frame-counter frame-info frame-timing frame-waiting?
          make-first-frame next-frame frame-do-action frame-extra-occs frame-time-remaining
          ; Timing
          Timing timing? timing-bursting
@@ -33,6 +33,8 @@
          stats-spawn-count stats-spawn-energy stats-waiting-frames stats-waiting-energy
          ; GameLog
          GameLog gamelog? read-gamelog gamelog->replay
+         ; AI
+         choose-move
 
          ; === below this line is only used in multiplayer ===
          write-dto read-dto
@@ -65,6 +67,7 @@
          )
 
 (require racket/provide
+         "core/ai.rkt"
          "core/data.rkt"
          "core/frame.rkt"
          "core/gamelog.rkt"

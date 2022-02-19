@@ -1,7 +1,7 @@
 #lang typed/racket
 
 (provide single-player-game multi-player-game
-         relaxed-replay-viewer
+         relaxed-replay-viewer relaxed-ai-stepper
          relaxed-single-player-game relaxed-multi-player-game)
 
 (require typed/pict
@@ -49,6 +49,9 @@
   (define (relaxed-replay-viewer [log : GameLog])
     (relax (replay-viewer log)))
 
+  (define (relaxed-ai-stepper [frame : Frame] [port : (U #f Output-Port)])
+    (relax (ai-stepper frame port)))
+
   (define (relaxed-single-player-game [x : (U State Frame)] [port : (U #f Output-Port)])
     (relax (single-player-game x port)))
 
@@ -78,51 +81,117 @@
        (lambda ()
          (state-game-over? (frame-state (replay-frame replay))))])))
 
-(: single-player-game (-> (U State Frame) (U #f Output-Port) Controller))
-(define (single-player-game x record-port)
-  (define game-log
+(: basic-game (-> (Boxof Frame) (U #f Output-Port) Controller))
+(define (basic-game frame-box record-port)
+
+  (define wrote-last-frame? : Boolean #f)
+
+  (define game-log : (-> Any Void)
     (if record-port
         (lambda (x)
           (write-dto x record-port)
           (displayln "" record-port))
         (lambda (x) (void))))
+
+  (define-syntax (frame stx) #'(unbox frame-box))
+
+  ; Also writes the last frame to the game log if we need to do so.
+  (define (check-game-over)
+    (let ([game-over? (state-game-over? (frame-state frame))])
+      (when (and game-over? (not wrote-last-frame?))
+        (set! wrote-last-frame? #t)
+        (game-log `(#:last-frame ,frame)))
+      game-over?))
+
+  (game-log `(#:version 1))
+  (game-log `(#:first-frame ,frame))
+
+  (lambda (sym)
+    (case sym
+      [(do-action!)
+       (lambda (action)
+         (let ([new-frame (frame-do-action frame action)])
+           (when new-frame
+             (set-box! frame-box new-frame)
+             (game-log (cons (frame-counter new-frame) action))
+             (cons (make-stamp #f #f (frame-counter new-frame))
+                   action))
+           (void)))]
+      [(next-frame!)
+       (lambda ()
+         (set-box! frame-box (car (next-frame frame)))
+         (check-game-over)
+         (void))]
+      [(get-pict)
+       (lambda (canvas-w canvas-h)
+         (single-player-pict frame canvas-w canvas-h))]
+      [(game-over?)
+       check-game-over])))
+
+(: single-player-game (-> (U State Frame) (U #f Output-Port) Controller))
+(define (single-player-game x record-port)
   (let ([frame (if (frame? x)
                    x
-                   (make-first-frame x))]
-        [wrote-last-frame? : Boolean #f])
+                   (make-first-frame x))])
+    (basic-game (box frame) record-port)))
 
-    ; Also writes the last frame to the game log if we need to do so.
-    (define (check-game-over)
-      (let ([game-over? (state-game-over? (frame-state frame))])
-        (when (and game-over? (not wrote-last-frame?))
-          (set! wrote-last-frame? #t)
-          (game-log `(#:last-frame ,frame)))
-        game-over?))
+(: ai-stepper (-> Frame (U #f Output-Port) Controller))
+(define (ai-stepper first-frame record-port)
+  (define frame-box (box first-frame))
+  (define-syntax (frame stx) #'(unbox frame-box))
 
-    (game-log `(#:version 1))
-    (game-log `(#:first-frame ,frame))
+  (: translate-actions (-> (Listof Action) (Listof Action)))
+  ; The AI output gives us plummet and burst per the State protocol, but
+  ; we need to translate into drop-keydown/keyup for the Frame protocol.
+  (define (translate-actions actions)
+    (match actions
+      [(list (action:plummet) (action:burst))
+       ; hold the drop key down
+       (list (action:drop-keydown))]
+      [(list (action:plummet))
+       ; press and release the drop key
+       (list (action:drop-keydown) (action:drop-keyup))]
+      [(list a)
+       (fail "last action was expected to be plummet or plummet+burst")]
+      [(list a b ...)
+       (cons a (translate-actions b))]))
 
+  (define pending-actions : (Listof Action) '())
+  (define (make-plan!)
+    (let* ([state (frame-state frame)]
+           [plan (choose-move state)])
+      (if plan
+          (let* ([actions (translate-actions (cadr plan))]
+                 ; always start the sequence by releasing the drop key
+                 [actions (cons (action:drop-keyup) actions)])
+            ;(pretty-print (print-grid (state-grid state)))
+            (set! pending-actions actions))
+          (fail "The only way to win is not to play...?"))))
+
+  (let ([decorated (basic-game frame-box record-port)])
     (lambda (sym)
       (case sym
         [(do-action!)
          (lambda (action)
-           (let ([new-frame (frame-do-action frame action)])
-             (when new-frame
-               (set! frame new-frame)
-               (game-log (cons (frame-counter new-frame) action))
-               (cons (make-stamp #f #f (frame-counter new-frame))
-                     action))
-             (void)))]
+           (match action
+             [(action:move 'r)
+              (when (and (frame-waiting? frame)
+                         (empty? pending-actions))
+                (make-plan!))]
+             [else #f])
+           (void))]
         [(next-frame!)
          (lambda ()
-           (set! frame (car (next-frame frame)))
-           (check-game-over)
-           (void))]
+           (when (and (not (empty? pending-actions))
+                      (= 0 (modulo (frame-counter frame) 4)))
+             (let ([action (car pending-actions)])
+               (set! pending-actions (cdr pending-actions))
+               ((decorated 'do-action!) action)))
+           ((decorated 'next-frame!)))]
         [(get-pict)
-         (lambda (canvas-w canvas-h)
-           (single-player-pict frame canvas-w canvas-h))]
+         (decorated 'get-pict)]
         [(game-over?)
-         check-game-over]))))
+         (decorated 'game-over?)]))))
 
 (: do-action (-> State Action (U #f State)))
 (define (do-action state action)
