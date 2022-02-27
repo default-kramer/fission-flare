@@ -1,0 +1,83 @@
+Laptop Setup
+* First get CUDA, per https://docs.nvidia.com/cuda/cuda-quick-start-guide/index.html
+  > py -m pip install --upgrade setuptools pip wheel
+  > py -m pip install nvidia-pyindex
+  > py -m pip install nvidia-cuda-runtime-cu11
+    - note that we got CUDA 11.x here
+* Now install PyTorch per https://pytorch.org/get-started/locally/
+  > pip3 install torch==1.10.2+cu113 torchvision==0.11.3+cu113 torchaudio===0.10.2+cu113 -f https://download.pytorch.org/whl/cu113/torch_stable.html
+    - note that we got CUDA 11.3 here
+* Now check if it worked
+  >>> import torch
+  >>> torch.cuda.is_available()
+
+
+The general idea is to treat this like a classification problem.
+My hope is that the classification model will be able to tell us when multiple moves look close-to-equally good.
+Then we can explore all of the best-looking moves.
+
+On most turns you have 30 orientations.
+An "orientation" ignores plummet vs burst.
+(We can either add the plummet-or-burst decision to the ML later, or just solve it using traditional techniques.)
+For example, if your current catalyst is <r b> you have
+* 7 possible translations after 0 degree rotation
+* 7 possible translations after 180 degree rotation
+* 8 possible translations after 90 degree rotation
+* 8 possible translations after 270 degree rotation
+If instead you have a double catalyst like <b b> then you only have 15 possible orientations.
+We will train these doubles as a separate model.
+
+How do we design the input layer?
+Erik Bern (https://erikbern.com/2014/11/29/deep-learning-for-chess.html) had success at chess by simply using an 8x8x12 one-dimensional vector.
+There are 12 pieces in chess, 6 per color.
+So it seems reasonable that we can do something similar.
+IMPORTANT - the vertical divorce principle will always be important!
+(All catalysts with a Direction of [Up, Down, False] are functionally equivalent to each other, so use False for all of them.)
+As for everything else, my gut says we should try this first:
+* If the mover is <r b>, then map the colors as r -> c1, b -> c2, y -> c3
+  - Rationale: This means that the model does not have to know what the mover is.
+    Or to put it another way, every mover is <c1 c2>.
+    BUT What about blanks? They are fundamentally different from the other colors.
+* If there are N totally empty rows at the top, exchange them for N extra rows of ground at the bottom.
+  - Rationale: the cells near the top is always the most relevant. This feels similar to centering or cropping an image.
+* We will "one hot encode" each feature
+* Represent each cell as two different aspects of multiple features
+  - A "color" aspect of 4 features: [c1, c2, c3, blank]
+    > Vacant cells and ground cells have no color
+  - A "kind" aspect of 5 features: [vacant, fuel, single, left, right]
+    > single, left, and right are the 3 different kinds of catalysts (remember vertical divorce)
+    > ground cells have no kind
+  - A "stable" aspect of 1 feature, which is set for all stable occupants (including ground) and unset otherwise
+Therefore each cell will have 10 features.
+This differs from Erik Bern's chess approach - he did not encode "white or black" separately from "kind of piece".
+IMPORTANT So if my approach doesn't work, this is probably the most suspect deviation.
+
+If we start with mini layouts, we have W=8 and H=12 so we get 8*12*10 total features which is 960.
+To test the waters, let's have the current AI create a bunch of training data and see if we can train a model to play like the current AI.
+Obviously the end goal is to play better than the current AI, but this should be a good first step to confirm that we are heading in the right direction (or not).
+
+
+
+=== PROGRESS ===
+Followed and adapted this tutorial https://pytorch.org/tutorials/beginner/basics/intro.html
+Changed input layer to be 960 one-hot-encoded bits based on a simple weighted random distribution.
+Currently finishes at about 94-95% accuracy.
+(I wonder what the optimal accuracy is?
+ It should be easy enough to calculate since we know exactly how the data was generated.
+ But it also depends on the luck of Python's RNG...)
+It takes about 11 minutes to run 10 epochs of 50k samples, plus the test_loop and other overhead.
+Questions:
+* Why does nn.CrossEntropyLoss crash? (I just switched to nn.MSELoss and it works.)
+* Why does nn.Softmax crash? (I just switched to torch.argmax and it works.)
+
+=== Next Steps ===
+Decide how to handle half-blank movers.
+* Probably a separate model is best. So then we will have
+  - A model for half-blank movers: <r o>
+  - A model for multicolored movers: <r b>
+  - A model for monocolored movers: <r r>
+Change the training python script to grab data from a file, and figure out what format would be best.
+Decide on a way to designate most of it as training data, and the rest as test data.
+* Perhaps one file per game, many moves per file, and a counter in the filename
+* For example {guid}.{i}.whatever where {guid} is unique and {i} is a single digit, then designate the *.0.whatever files as test data.
+Make Racket generate the test data. Just let it run overnight with an estimated total GB limit.
