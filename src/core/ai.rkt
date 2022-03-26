@@ -1,8 +1,10 @@
 #lang typed/racket
 
-(provide (rename-out [get-plan choose-move]))
+(provide (rename-out [get-plan choose-move])
+         Orientation ori-label)
+
 (module+ exercise-help
-  (provide fast-forward))
+  (provide fast-forward possi-ori))
 
 (require racket/fixnum
          "../typed-utils.rkt"
@@ -978,12 +980,86 @@
               danger-score
               blockage-score)))
 
+; An Orientation is a primitive representation of where the mover can be.
+; This does not yet specify whether it plummets or bursts.
+; The first number is rotation, where 0=0, 1=90, 2=180, 3=270 degrees.
+; The second number is translation, where a negative number means
+; "to the left" and a positive number means "to the right".
+; The third number is a zero-based index which uniquely identifies the
+; orientation within the scope of a certain width.
+(define-type Orientation (List Fixnum Fixnum Fixnum))
+(define ori-rotation (ann first (-> Orientation Fixnum)))
+(define ori-translation (ann second (-> Orientation Fixnum)))
+(define ori-label (ann third (-> Orientation Fixnum)))
+
+; Build two lists of all possible orientations for:
+;  sym8  : width=8 and mover is symmetric
+;  asym8 : width=8 and mover is asymmetric
+(define-values (sym8 asym8)
+  (let ()
+    (define-syntax-rule (stage-orientations [r (t ...)] ...)
+      (apply append (list (map (lambda ([t2 : Fixnum]) (list r t2))
+                               (list t ...))
+                          ...)))
+    (define staged-orientations
+      #;(stage-orientations
+         [0 (-1 -2 -3 0 1 2 3)]
+         [1 (-1 -2 -3 0 1 2 3 4)]
+         [2 (-1 -2 -3 0 1 2 3)]
+         [3 (-1 -2 -3 0 1 2 3 4)])
+      ; Older code generated the orientations in the order below.
+      ; For some reason, the AI performs better this way than vs the simpler
+      ; commented-out order above, so we'll keep it this way for now.
+      (stage-orientations
+       ; first do rotations with no translation
+       [0 (0)]
+       [1 (0)]
+       [2 (0)]
+       [3 (0)]
+       ; now do left translations
+       [0 (-1 -2 -3)]
+       [1 (-1 -2 -3)]
+       [2 (-1 -2 -3)]
+       [3 (-1 -2 -3)]
+       ; now do right translations
+       [0 (1 2 3)]
+       [1 (1 2 3 4)]
+       [2 (1 2 3)]
+       [3 (1 2 3 4)]))
+
+    (: build (-> (Listof (List Fixnum Fixnum)) (Listof Fixnum) Fixnum
+                 (Listof Orientation)))
+    (define (build lst r-filter index)
+      (match lst
+        [(cons (list r t) more)
+         (if (member r r-filter)
+             (cons (ann (list r t index) Orientation)
+                   (build more r-filter (fx+ index 1)))
+             (build more r-filter index))]
+        [(list)
+         (list)]))
+
+    ; The symmetric possibilities exclude rotation 2 and 3 (aka 180 and 270)
+    ; because they are duplicates of 1 and 2 (aka 0 and 90)
+    (values (build staged-orientations '(0 1) 0)
+            (build staged-orientations '(0 1 2 3) 0))))
+
+(: all-orientations (-> Fixnum Boolean (Listof Orientation)))
+; Returns all possible orientations given a certain width.
+(define (all-orientations width symmetric?)
+  (when (not (fx= width 8))
+    (fail "unexpected width" width))
+  (if symmetric? sym8 asym8))
+
 (define-type MoveSeq (Listof Action))
 
 ; A Possibility (or "possi") is a reachable state.
 ; (Hmm... perhaps we should also hold the starting state?)
-(define-type Possibility (List State MoveSeq))
+; The Orientation somewhat repeats information in the MoveSeq.
+(define-type Possibility (List State MoveSeq Orientation))
 (define possi-state (ann first (-> Possibility State)))
+(define possi-seq (ann second (-> Possibility MoveSeq)))
+(define possi-ori (ann third (-> Possibility Orientation)))
 
 ; A Choice is a Possibility that has been scored
 (define-type Choice (Pairof Fixnum Possibility))
@@ -991,34 +1067,47 @@
 (define choice-state (ann second (-> Choice State)))
 (define choice-possi (ann cdr (-> Choice Possibility)))
 
-(: get-rotations (-> State (Listof Possibility)))
-(define (get-rotations state)
+(: orientation->move-seq (-> Orientation MoveSeq))
+(define (orientation->move-seq ori)
+  (let* ([seq1 : MoveSeq
+               (case (ori-rotation ori)
+                 [(0) (list)]
+                 [(1) (list (rotate #t))]
+                 [(2) (list (rotate #t) (rotate #t))]
+                 [(3) (list (rotate #f))]
+                 [else (fail "invalid rotation:" ori)])]
+         [t (ori-translation ori)]
+         [seq2 : MoveSeq
+               (make-list (abs t) (if (negative? t)
+                                      (move 'l)
+                                      (move 'r)))])
+    (append seq1 seq2)))
+
+(: orientation-possis (-> State (Listof Possibility)))
+; Returns all Orientations converted to Possibilities.
+; Do not decide yet whether we will plummet or burst.
+(define (orientation-possis state)
   (let* ([mover (state-mover state)]
          #:break (when (not mover)
                    ; no moves are allowed in this state
                    (list))
-         [double? (equal? (catalyst-color (mover-occ-a mover))
-                          (catalyst-color (mover-occ-b mover)))]
-         [seqs : (Listof MoveSeq)
-               (if double?
-                   (list (list)
-                         (list (rotate #t)))
-                   (list (list)
-                         (list (rotate #t))
-                         (list (rotate #t) (rotate #t))
-                         (list (rotate #f))))])
-    (for/list ([seq seqs])
-      (let* ([result (state-apply state seq)]
+         [symmetric? (equal? (catalyst-color (mover-occ-a mover))
+                             (catalyst-color (mover-occ-b mover)))]
+         [oris (all-orientations (state-width state) symmetric?)])
+    (for/list ([ori : Orientation oris])
+      (let* ([seq (orientation->move-seq ori)]
+             [result (state-apply state seq)]
              [new-state (car result)]
              #:break (when (not new-state)
-                       (fail "rotation failed unexpectedly"))
-             [poss : Possibility (list new-state seq)])
+                       (fail "orientation failed unexpectedly" ori seq))
+             [poss : Possibility (list new-state seq ori)])
         poss))))
 
 (: try (-> Possibility (U Action (Listof Action)) (U #f Possibility)))
 (define (try poss action)
-  (let* ([old-state : State (car poss)]
-         [old-seq : MoveSeq (cadr poss)]
+  (let* ([old-ori (possi-ori poss)]
+         [old-state (possi-state poss)]
+         [old-seq (possi-seq poss)]
          [new-seq : MoveSeq
                   (if (list? action)
                       action
@@ -1026,7 +1115,7 @@
          [result (state-apply old-state new-seq)]
          [new-state (car result)])
     (and new-state
-         (list new-state (append old-seq new-seq)))))
+         (list new-state (append old-seq new-seq) old-ori))))
 
 (: iterate (-> (U Action (Listof Action)) Boolean (-> Possibility (Listof Possibility))))
 (define (iterate action repeat?)
@@ -1039,15 +1128,6 @@
               (list result))
           (list))))
   go)
-
-(: catalyst-positions (-> State (Listof Possibility)))
-; Returns all possible positions for the catalyst, but do not decide yet
-; whether we will plummet or burst.
-(define (catalyst-positions state)
-  (let ([rots (get-rotations state)])
-    (append rots
-            (flatmap (iterate (move 'l) #t) rots)
-            (flatmap (iterate (move 'r) #t) rots))))
 
 (: fast-forward (-> State State))
 (define (fast-forward state)
@@ -1065,7 +1145,7 @@
          [actions (case kind
                     [(plummet) (list (plummet))]
                     [(burst) (list (plummet) (burst))])]
-         [possis (flatmap (iterate actions #f) (catalyst-positions state))]
+         [possis (flatmap (iterate actions #f) (orientation-possis state))]
          [choices (map (lambda ([p : Possibility])
                          (ann (cons (score p) p) Choice))
                        possis)]

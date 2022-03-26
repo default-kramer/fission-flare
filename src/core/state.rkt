@@ -1094,11 +1094,10 @@
                   (make-vector pattern-size #f)]
          [pattern (create-pattern prng pattern fuel-count)]
          ; Apply pattern
-         [grid (or (add-fuels prng grid pattern 0)
-                   (add-fuels prng grid pattern 0)
-                   (add-fuels prng grid pattern 0)
-                   ; Only about 6 out of 1000 fails, so getting 3 in a row
-                   ; means something else is probably wrong
+         [grid (or (for/or : (U #f Grid) ([_ (in-range 10)])
+                     (add-fuels prng grid pattern 0))
+                   ; When I only retried 3 times, it would eventually fail while
+                   ; generating a large number of games.
                    (fail "failed to add fuel, invalid game settings maybe?"))]
          [rand-vec (prng->vector prng)]
          [ls (struct-copy LayoutState ls

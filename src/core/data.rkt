@@ -1,6 +1,7 @@
 #lang typed/racket/base
 
 (provide (all-defined-out)
+         LaxPrngState
          write-dto)
 
 (require (for-syntax typed/racket/base)

@@ -81,3 +81,22 @@ Decide on a way to designate most of it as training data, and the rest as test d
 * Perhaps one file per game, many moves per file, and a counter in the filename
 * For example {guid}.{i}.whatever where {guid} is unique and {i} is a single digit, then designate the *.0.whatever files as test data.
 Make Racket generate the test data. Just let it run overnight with an estimated total GB limit.
+
+
+== PROGRESS ==
+For now I'm only writing the "normal" catalyst type
+Writing to {seed}.{i}.csv via the main module of ai-exercise.rkt (maybe this should be relocated)
+
+Updated get-plan/choose-move so that the returned Possibility now contains an Orientation with a label.
+This label is what we want the ML to be able to choose, given a description of the current state.
+Refactored ai-exercise so that its main module can now write a CSV file for ML to consume.
+The CSV format is:
+* catalyst type (normal, double, half-blank) (or put in filename)
+* label (label in 1-30 or whatever it maps to)
+* features (string like "10010100110110100010011100[...]")
+
+=== Next Steps ===
+To read the features in Python, do this:
+  x = [float(char) for char in "10110010100100100010"]
+  y = torch.tensor(x)
+And then see if it can learn to predict what the current algorithmic AI plays
